@@ -461,3 +461,20 @@ def _testcam_url(name: str) -> str:
                     break
     return f"http://127.0.0.1:{testcam.PORT}/{quote(name)}"
 
+
+
+# "Testa kameran": which address gives a camera's video (probe.py), only for cameras on the local network
+class ProbeIn(BaseModel):
+    host: str
+    user: str = ""
+    password: str = ""
+
+
+@app.post("/api/probe")
+def probe_camera(body: ProbeIn):
+    from . import probe
+
+    try:
+        return probe.probe(body.host, body.user.strip(), body.password)
+    except probe.NotLocal as e:
+        raise HTTPException(400, str(e)) from None

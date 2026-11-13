@@ -33,6 +33,11 @@
     .thing .ref button { position: absolute; top: 2px; right: 2px; padding: 0 6px; min-height: 0; height: 20px; font-size: 12px; }
     @media (max-width: 900px) { .things { grid-template-columns: 1fr; } }
     .live-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: var(--s-4); margin-top: var(--s-4); }
+    .probe { margin-top: var(--s-3); padding: var(--s-3); background: var(--bg-surface); border: var(--border-w) solid var(--border-card); }
+    .probe table { width: 100%; border-collapse: collapse; font-size: var(--fs-note); margin-top: var(--s-2); }
+    .probe td { padding: 4px 6px; border-top: var(--border-w) solid var(--border-card); }
+    .probe .ok { color: var(--ok, #12A150); font-weight: 600; }
+    .probe .advice { font-weight: 600; margin: var(--s-2) 0 0; }
     .live-cam { background: var(--bg-surface); border: var(--border-w) solid var(--border-card); }
     .live-cam .head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); padding: 10px 12px; font-size: var(--fs-note); }
     .live-cam img { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; object-fit: contain; }
@@ -105,6 +110,16 @@
         <button type="button" id="liveBtn">Starta</button>
       </div>
       <p class="muted" id="liveNote"></p>
+      <details class="probe" id="probeBox">
+        <summary>Testa kameran: vilken adress ger bilden?</summary>
+        <div class="runrow">
+          <label>Kamerans IP-adress <input id="probeHost" placeholder="192.168.0.64" autocomplete="off" spellcheck="false" size="16"></label>
+          <label>Användare <input id="probeUser" autocomplete="off" spellcheck="false" size="10"></label>
+          <label>Lösenord <input id="probePass" type="password" autocomplete="new-password" size="10"></label>
+          <button type="button" id="probeBtn">Testa</button>
+        </div>
+        <div id="probeOut"></div>
+      </details>
       <div class="live-list" id="liveList"></div>
       <p class="muted">Länken till de anonymiserade live-videorna: <span class="link" id="liveLink">–</span><br>
         Ut på internet med en tunnel till port <span id="livePort">8431</span>, till exempel <code>cloudflared tunnel --url http://127.0.0.1:8431</code>, och lägg till <code>/v/&lt;nyckeln&gt;/</code> från länken. Bara streckgubbarna nås där.</p>
@@ -393,6 +408,37 @@ async function livePoll() {
   for (const img of $("#liveList").querySelectorAll("img")) if (img.complete && !img.naturalWidth) img.src = img.src.replace(/\?\d+$/, "?" + Date.now());
   livePoll.t = setTimeout(livePoll, 2000);
 }
+// "Testa kameran" (probe.py): ports, make, the common RTSP addresses and one frame from the one that works
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+$("#probeBtn").onclick = async () => {
+  const host = $("#probeHost").value.trim(), user = $("#probeUser").value.trim(), password = $("#probePass").value;
+  if (!host) return;
+  $("#probeBtn").disabled = true;
+  $("#probeOut").innerHTML = `<p class="muted">Testar ${esc(host)} … (upp till en halv minut)</p>`;
+  try {
+    const r = await fetch("/api/probe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, user, password }) });
+    const j = await r.json();
+    if (!r.ok) { $("#probeOut").innerHTML = `<p class="advice">${esc(j.detail)}</p>`; return; }
+    const web = j.web?.make || j.web?.title || j.web?.server;
+    const shown = j.tried.filter((t) => t.code !== 404 && t.code !== 454);
+    const pic = j.frame ? (j.frame.error ? ` · ${esc(j.frame.error)}` : ` · bild ${j.frame.width}×${j.frame.height}${j.frame.fps ? `, ${j.frame.fps} bilder/s` : ""}`) : "";
+    $("#probeOut").innerHTML = `<p class="advice">${esc(j.advice)}</p>
+      <p class="muted">${esc(j.ip)} · öppna portar: ${j.ports.length ? j.ports.join(", ") : "inga"}${web ? ` · webbsidan: ${esc(web)}` : ""}${pic}</p>
+      ${j.best ? `<p><span class="ok">${esc(j.best.address)}</span> <button type="button" class="secondary compact" id="probeUse">Använd</button></p>` : ""}
+      <table>${shown.map((t) => `<tr><td>${esc(t.make)}</td><td>${t.port}${esc(t.path)}</td><td class="${t.code === 200 ? "ok" : ""}">${esc(t.meaning)}</td></tr>`).join("")}</table>
+      <p class="muted">${j.tried.length} adresser provade${j.tried.length - shown.length ? `, ${j.tried.length - shown.length} fanns inte` : ""}.</p>`;
+    if (j.best) $("#probeUse").onclick = () => {
+      const login = user ? `${encodeURIComponent(user)}:${encodeURIComponent(password)}@` : "";
+      $("#liveSrc").value = ""; $("#liveUrlBox").hidden = false;
+      $("#liveUrl").value = `rtsp://${login}${j.ip}:${j.best.port}${j.best.path}`;
+      $("#liveNote").textContent = "Adressen är ifylld. Ge kameran ett namn och tryck Starta.";
+    };
+  } catch (e) {
+    $("#probeOut").innerHTML = `<p class="advice">Testet misslyckades: ${esc(e)}</p>`;
+  } finally {
+    $("#probeBtn").disabled = false;
+  }
+};
 init();
 things();
 poll();
