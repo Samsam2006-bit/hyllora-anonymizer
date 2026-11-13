@@ -36,6 +36,10 @@ def export(dst: Path) -> None:
         shutil.copyfile(ROOT / n, dst / n)
     for src, name in EXTRA.items():
         shutil.copyfile(HERE / "testrepo" / src, dst / name)
+    # cmd misreads labels and goto in a .bat with Unix line ends: CRLF, kept as is by git (-text)
+    bat = dst / "start.bat"
+    bat.write_bytes(bat.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    (dst / ".gitattributes").write_text("*.bat -text\n")
     shutil.copyfile(ROOT / "anonymizer" / "LICENSE", dst / "LICENSE")
     fonts = dst / "static" / "vendor" / "fonts"  # the page mounts this folder: it must exist
     fonts.mkdir(parents=True, exist_ok=True)
