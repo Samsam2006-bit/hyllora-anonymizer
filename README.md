@@ -8,6 +8,8 @@ Anonymiseraren ser kamerans bild och skickar bara siffror vidare: var personerna
 2. Dubbelklicka på **`start.bat`**. Första gången installeras allt som behövs (några GB, det tar en stund). Sedan går det fort.
 3. Sidan öppnas i webbläsaren: **http://127.0.0.1:8430**. Fönstret med texten måste vara öppet så länge den körs.
 
+Säger Windows "Windows skyddade din dator": *Mer information → Kör ändå* (filen kommer från internet).
+
 Står det `Grafikkort: INGET` körs allt på processorn och blir långsamt. Uppdatera då NVIDIA-drivrutinen.
 
 ## Testa
@@ -19,7 +21,7 @@ Det som görs hamnar i `data/` i mappen och stannar på datorn.
 
 ## Ny version
 
-Ladda ner ZIP igen och packa upp den **över samma mapp** (ersätt filerna). Då behålls det installerade och `data/`.
+**Stäng fönstret och dubbelklicka på `start.bat` igen.** Varje gång den startar letar den efter en ny version här och hämtar bara koden (några hundra KB). Det installerade, modellerna och `data/` behålls. Paketen installeras om bara när de har ändrats. Fönstret visar vilken version som körs.
 
 ## Licens
 

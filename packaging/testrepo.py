@@ -17,7 +17,7 @@ sys.path.insert(0, str(HERE))
 
 import stage  # noqa: E402
 
-EXTRA = {"start.bat": "start.bat", "get_models.py": "get_models.py", "README.md": "README.md",
+EXTRA = {"start.bat": "start.bat", "run.ps1": "run.ps1", "get_models.py": "get_models.py", "README.md": "README.md",
          "gitignore": ".gitignore"}
 
 
@@ -36,10 +36,11 @@ def export(dst: Path) -> None:
         shutil.copyfile(ROOT / n, dst / n)
     for src, name in EXTRA.items():
         shutil.copyfile(HERE / "testrepo" / src, dst / name)
-    # cmd misreads labels and goto in a .bat with Unix line ends: CRLF, kept as is by git (-text)
-    bat = dst / "start.bat"
-    bat.write_bytes(bat.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-    (dst / ".gitattributes").write_text("*.bat -text\n")
+    # Windows line ends for the scripts Windows runs (cmd misreads a .bat with Unix ones), kept as is by git (-text)
+    for name in ("start.bat", "run.ps1"):
+        f = dst / name
+        f.write_bytes(f.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    (dst / ".gitattributes").write_text("*.bat -text\n*.ps1 -text\n")
     shutil.copyfile(ROOT / "anonymizer" / "LICENSE", dst / "LICENSE")
     fonts = dst / "static" / "vendor" / "fonts"  # the page mounts this folder: it must exist
     fonts.mkdir(parents=True, exist_ok=True)
