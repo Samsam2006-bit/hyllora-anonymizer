@@ -13,8 +13,10 @@ import numpy as np
 from . import skeleton
 
 FPS = 10  # pictures per second sent at most (the stream has ~25: the link need not carry them all)
-WIDTH = 960  # sent this wide at most
+WIDTH = 960  # sent this wide at most over the link (viewer.py): little to carry over the internet
 QUALITY = 70
+LOCAL_WIDTH, LOCAL_QUALITY = 1920, 90  # on this computer's own page (server.py) nothing is carried: sharp
+                                       # (Sameh 2026-11-13: "varför är footagen blurrig")
 IDLE_END_S = 30.0  # a stream not written to for this long has stopped (the anonymizer died without its end line)
 BOUNDARY = "frame"
 
@@ -40,18 +42,19 @@ def live_names(root: Path) -> list[str]:
     return sorted(p.parent.name for p in Path(root).glob("*/" + skeleton.FILE) if is_live(p.parent)) if Path(root).is_dir() else []
 
 
-def picture(rows, size, bg: np.ndarray | None) -> bytes:
-    """One frame's people on the empty store (or on grey until it is made), as a JPEG."""
+def picture(rows, size, bg: np.ndarray | None, width: int = WIDTH, quality: int = QUALITY) -> bytes:
+    """One frame's people on the empty store (or on grey until it is made), as a JPEG at most `width` wide."""
     W, H = size
     img = bg if bg is not None and bg.shape[1] == W and bg.shape[0] == H else np.full((H, W, 3), 60, np.uint8)
     out = skeleton.draw(img, rows)
-    if W > WIDTH:
-        out = cv2.resize(out, (WIDTH, round(H * WIDTH / W)), interpolation=cv2.INTER_AREA)
-    ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
+    if W > width:
+        out = cv2.resize(out, (width, round(H * width / W)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes() if ok else b""
 
 
-def mjpeg(folder: Path, stop=lambda: False, fps: float = FPS, poll_s: float = 0.03):
+def mjpeg(folder: Path, stop=lambda: False, fps: float = FPS, poll_s: float = 0.03, width: int = WIDTH,
+          quality: int = QUALITY):
     """multipart/x-mixed-replace parts of the stream from now on, at most `fps` a second, until it ends, stops
     growing for IDLE_END_S, or stop() is true."""
     folder = Path(folder)
@@ -84,5 +87,5 @@ def mjpeg(folder: Path, stop=lambda: False, fps: float = FPS, poll_s: float = 0.
                     bg, bg_mtime = cv2.imread(str(folder / skeleton.BACKGROUND)), m
             except OSError:
                 pass
-            jpg = picture(latest, size, bg)
+            jpg = picture(latest, size, bg, width, quality)
             yield (f"--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpg)}\r\n\r\n").encode() + jpg + b"\r\n"

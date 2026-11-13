@@ -426,7 +426,7 @@ def live_view(name: str):
     folder = SKELETONS / f"{name}.live"
     if not _plain(name) or not view.is_live(folder):
         raise HTTPException(404)
-    return StreamingResponse(view.mjpeg(folder), media_type=f"multipart/x-mixed-replace; boundary={view.BOUNDARY}",
+    return StreamingResponse(view.mjpeg(folder, width=view.LOCAL_WIDTH, quality=view.LOCAL_QUALITY), media_type=f"multipart/x-mixed-replace; boundary={view.BOUNDARY}",
                              headers={"Cache-Control": "no-store"})
 
 
