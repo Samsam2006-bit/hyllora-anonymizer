@@ -11,6 +11,13 @@ Affero General Public License version 3 (anonymizer/LICENSE), as Ultralytics' YO
 LIC1). It comes with ABSOLUTELY NO WARRANTY.
 """
 
+import os
+
+# RTSP video over TCP, not FFmpeg's default UDP: a Windows firewall lets the camera's answer in over the connection
+# the anonymizer opened, but not the video on UDP ports of its own, and the camera then "cannot be opened"
+# (ValueError at the store, 2026-11-13). Read by OpenCV each time a capture is opened; the camera processes inherit it.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
 try:  # HTTPS (sending to the analysis) checked by the operating system, as the browser does (packaging/requirements.txt)
     import truststore
 

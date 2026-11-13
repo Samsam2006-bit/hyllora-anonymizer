@@ -66,9 +66,23 @@ class NotLocal(ValueError):
     pass
 
 
+def host_of(text: str) -> str:
+    """The camera's host from whatever was pasted: an IP, "ip:port", or a whole address from the browser or VLC
+    ("http://192.168.0.64/", "rtsp://admin:x@192.168.0.64:554/CH001.sdp")."""
+    from urllib.parse import urlsplit
+
+    text = text.strip()
+    if "://" not in text:
+        text = "//" + text
+    try:
+        return urlsplit(text).hostname or ""
+    except ValueError:
+        return ""
+
+
 def local_host(host: str) -> str:
-    """The IP address of `host` when it is on a local network; NotLocal otherwise."""
-    host = host.strip().strip("[]")
+    """The IP address of `host` (or of the address pasted, host_of) when it is on a local network; NotLocal else."""
+    host = host_of(host)
     if not re.fullmatch(r"[0-9A-Za-z.:-]{1,253}", host):
         raise NotLocal("Skriv kamerans IP-adress, till exempel 192.168.0.64")
     try:
