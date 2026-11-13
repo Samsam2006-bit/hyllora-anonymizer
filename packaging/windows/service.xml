@@ -1,0 +1,23 @@
+<!-- The anonymizer as a Windows service (WinSW, MIT): starts at boot, before anyone logs in, and again if it stops.
+     installer.iss copies WinSW as hyllora-anonymizer-service.exe beside this file (same name, .xml) and fills in
+     @INGEST_URL@. %BASE% is the install folder. -->
+<service>
+  <id>HylloraAnonymizer</id>
+  <name>Hyllora anonymiserare</name>
+  <description>Ser kamerornas bild och skickar bara streckgubbar vidare. Sidan: http://127.0.0.1:8430</description>
+  <executable>%BASE%\python\python.exe</executable>
+  <arguments>"%BASE%\launcher.py"</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>30 sec</stoptimeout>
+  <env name="HYLLORA_INGEST_URL" value="@INGEST_URL@"/>
+  <env name="PYTHONUNBUFFERED" value="1"/>
+  <logpath>%ProgramData%\Hyllora\Anonymizer\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+</service>

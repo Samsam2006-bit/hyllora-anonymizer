@@ -1,0 +1,136 @@
+/* Hyllora design tokens: varumärket från hyllora.com (bläck #141414, accent #F34B29,
+   Google Sans, loggan) i formspråket från Strabys arbetsgivarportal (grå sida, vit
+   sidomeny, vita kort med mjuk skugga och raka hörn, rundade knappar, grå text i
+   tre nivåer). Alla färger, storlekar och radier i gränssnittet kommer härifrån. app.js läser kartans ritfärger (--map-*, --bg-*, --text,
+   --line-strong, --ok/--warn/--error, --selected) med getComputedStyle, så
+   de måste vara hex-värden: koden lägger på genomskinlighet som två hexsiffror. */
+:root {
+  /* Grund – grå sida, vita kort ovanpå. Korten lyfts med --shadow-card, inte med kant */
+  --bg-page:     #FAFAFA;  /* sidans bakgrund bakom korten */
+  --bg-card:     #FFFFFF;  /* kort, paneler, nyckeltal */
+  --bg-field:    #F7F7F7;  /* fält och sekundärknappar */
+  --bg-rail:     #FFFFFF;  /* sidomeny */
+  --bg-base:     #FFFFFF;  /* ritytor (kartan, kamerabilden), läses av app/*.js */
+  --bg-surface:  #FAFAFA;  /* inre ytor i ett kort */
+  --bg-raised:   #F0F0F0;  /* hover, neutrala taggar */
+
+  /* Linjer */
+  --border-card:    #E0E0E0;  /* ALLA kort/paneler/kartyta/taggar: 1px ljusgrå */
+  --line:           #EBEBEB;  /* tunna avdelare mellan rader och sektioner */
+  --line-strong:    #D7D7D7;  /* kant på sekundärknappar, fält, väljare */
+  --line-soft:      #EFEFEF;  /* sidomenyns avdelare, flikradens underkant */
+
+  --shadow-card: 0 1px 2px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.035);
+
+  /* Text – tre nivåer. Grått bara för det som förklarar; siffror och namn är svarta */
+  --text:        #141414;  /* hyllora.com: --ink */
+  --text-2:      #525252;  /* undertitlar, menyrader, etiketter (7,9:1 mot vitt) */
+  --text-3:      #6B6B6B;  /* förklaringar, enheter, tabellrubriker (5,3:1) */
+  --text-on-selected: #FFFFFF; /* text på svarta (valda) ytor */
+  --on-color:    #FFFFFF;  /* ring och siffra på färgade prickar och linjer ovanpå kamerabilden */
+
+  /* Interaktion – svart betyder "valt" eller "primär handling" */
+  --selected:    #141414;
+  --pressed:     #333333;
+  --focus:       #F34B29;  /* fokusring, som på hyllora.com */
+  --accent:      #F34B29;  /* Hylloras accent: vald menyrad och flik, hover på primärknappar, fokus. Inte för data */
+  --nav-active:  rgba(20,20,20,.06); /* bakgrund på vald menyrad */
+  --on-accent:   #141414;  /* text på accent */
+
+  /* Data & status – färg används bara för data och status */
+  --signal:      #2F6BFF;  /* mätvärden, räknelinje, gångvägar */
+  --signal-dim:  #D6E2FF;  /* icke-markerade staplar */
+  --heat:        #F76707;  /* lång tid / hög täthet */
+  --heat-soft:   #FFC999;
+  --ok:          #12A150;
+  --warn:        #D98E04;
+  --error:       #E03131;
+  --error-text:  #C92A2A;
+
+  --ok-bg:       rgba(18,161,80,0.10);
+  --error-bg:    rgba(224,49,49,0.08);
+  --warn-bg:     #FAEFD8;
+  --warn-ink:    #8A5A10;  /* text på --warn-bg */
+
+  /* Täthetsskala (heatmap, zoner, förklaring). Ljus = lite, mörk/varm = mycket */
+  --heat-ramp: linear-gradient(90deg, #DCE6FF 0%, #2F6BFF 40%, #FFC999 72%, #F76707 100%);
+
+  /* Typografi */
+  --font-body:    'Google Sans', Arial, Helvetica, sans-serif;
+  --font-display: 'Google Sans', Arial, Helvetica, sans-serif; /* rubriker och stora siffror */
+
+  /* Form */
+  --radius-surface: 0;      /* kort, paneler, karta, taggar, etiketter, menyrader */
+  --radius-control: 0;      /* fält och väljare */
+  --radius-button: 999px;   /* knappar och segmentväljare: bara det man trycker på är runt */
+
+  /* Avstånd – 4 px-rutnät */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px;
+  --s-6: 24px; --s-8: 32px; --s-12: 48px; --s-16: 64px;
+
+  /* Mått */
+  --rail-w: 248px;
+  --header-h: 80px;
+  --page-pad: 28px;
+  --control-h: 40px;
+  --control-h-compact: 32px;
+  --icon: 18px;
+
+  /* ─── Tillägg utöver specen ─── */
+
+  /* Typskala: storlek / radhöjd */
+  --fs-page: 24px;    --lh-page: 30px;     /* sidrubrik */
+  --fs-kpi: 28px;     --lh-kpi: 32px;      /* nyckeltal */
+  --fs-kpi-unit: 14px;
+  --fs-panel: 16px;   --lh-panel: 24px;    /* panelrubrik */
+  --fs-body: 14.5px;  --lh-body: 22px;     /* brödtext */
+  --fs-note: 13.5px;  --lh-note: 20px;     /* förklaring, undertitel */
+  --fs-label: 12px;   --lh-label: 16px;    /* etikett (gemener, som i Straby) */
+  --fs-nav: 13.5px;                        /* menyrader */
+  --fs-rail-label: 12px;
+  --fs-micro: 12px;                        /* timetiketter, taggar */
+  --fs-logo: 20px;
+  --fw-body: 400;
+  --track-label: 0.06em;
+  --track-rail: 0.08em;
+  --track-page: -0.022em; /* tät spärrning i rubriker */
+  --track-kpi: -0.03em;
+
+  /* Småmått */
+  --dot: 8px;
+  --dot-small: 6px;
+  --swatch: 12px;
+  --tag-h: 24px;
+  --bar-h: 4px;
+  --panel-w: 320px;
+  --legend-w: 220px;
+  --narrow-w: 480px;
+  --field-num-w: 64px;
+  --focus-w: 2px;
+  --border-w: 1px;
+
+  /* Kartans ritfärger (läses av app.js, hex krävs) */
+  --map-grid:  #F2F2F2;  /* 20px-rutnätet och metertätt rutnät */
+  --map-zone:  #F76707;  /* zoner mäter tid i zon, därav värmefärgen */
+  --map-line:  #2F6BFF;  /* räknelinje = --signal */
+  --map-shelf: #E60000;  /* hyllans kant: starkt rött överallt (karta, kamerabild, 3D, video) så att linjerna syns */
+  --map-draft: #2F6BFF;  /* det man håller på att rita */
+  /* Planritningens hyllfärger (kategori): ljus fyllning och en mörkare kant. Samma nycklar som PLAN_TINTS i app.js */
+  --plan-blue-fill:   #E4EFFA; --plan-blue-line:   #2F68B0;
+  --plan-green-fill:  #E1F3EC; --plan-green-line:  #1F7A55;
+  --plan-orange-fill: #FDF0E1; --plan-orange-line: #D9822B;
+  --plan-purple-fill: #EEE8FA; --plan-purple-line: #6B4FB8;
+  --plan-grey-fill:   #F1EFEC; --plan-grey-line:   #8A8580;
+  --plan-wall:        #4A4A4A; /* väggar: mörk fyllning, som på en ritning */
+  --plan-floor:       #F4F1EA; /* golvytan där man går, under allt annat */
+  --plan-floor-line:  #BDB6A8;
+  --plan-camera:      #F0A030; /* kamerans prick och synfältets streckade kanter */
+  --plan-camera-fov:  #FDF0E1; /* synfältets fyllning */
+  --plan-marker:      #B5B5B5; /* ringen runt hyllans nummer */
+  --plan-dim:         #8C8C8C; /* måttlinjer och skalstock */
+
+  /* Pil i väljare (select). Ikonen "chevron ned" i --text, som data-URI. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18' fill='none' stroke='%23141414' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='M5 7l4 4 4-4'/%3E%3C/svg%3E");
+
+  color-scheme: light;
+}

@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anonymiserare · Hyllora</title>
+  <link rel="icon" type="image/svg+xml" href="/static/hyllora.svg">
+  <link rel="preload" href="/static/vendor/fonts/google-sans-latin-1.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    /* Anonymiserare (ARCHITECTURE §13): what goes into the anonymizer and the only thing that comes out */
+    .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: var(--s-4); }
+    .pair figure { margin: 0; background: var(--bg-card); box-shadow: var(--shadow-card); }
+    .pair figcaption { display: flex; align-items: center; gap: var(--s-2); padding: 12px 16px; font-size: var(--fs-note); font-weight: 600; }
+    .pair video, .pair canvas { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; }
+    .scrub { display: flex; align-items: center; gap: var(--s-3); }
+    .scrub input[type=range] { flex: 1; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+    .scrub .time { font-variant-numeric: tabular-nums; color: var(--text-2); min-width: 64px; text-align: right; font-size: var(--fs-note); }
+    .runrow { display: flex; align-items: flex-end; gap: var(--s-3); flex-wrap: wrap; }
+    .runrow label { display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-label); color: var(--text-2); font-weight: 600; }
+    .runrow label.check { flex-direction: row; align-items: center; height: var(--control-h); }
+    .bar { height: 6px; background: var(--bg-raised); }
+    .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+    .things { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: var(--s-4); }
+    .things canvas { display: block; width: 100%; background: var(--bg-surface); border: var(--border-w) solid var(--border-card); cursor: crosshair; touch-action: none; }
+    .thing-list { display: flex; flex-direction: column; gap: var(--s-3); }
+    .thing { background: var(--bg-surface); border: var(--border-w) solid var(--border-card); padding: 10px 12px; }
+    .thing b { font-size: var(--fs-note); }
+    .thing .refs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .thing .ref { position: relative; }
+    .thing .ref canvas { width: 72px; height: 72px; cursor: default; }
+    .thing .ref button { position: absolute; top: 2px; right: 2px; padding: 0 6px; min-height: 0; height: 20px; font-size: 12px; }
+    @media (max-width: 900px) { .things { grid-template-columns: 1fr; } }
+    .live-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: var(--s-4); margin-top: var(--s-4); }
+    .live-cam { background: var(--bg-surface); border: var(--border-w) solid var(--border-card); }
+    .live-cam .head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); padding: 10px 12px; font-size: var(--fs-note); }
+    .live-cam img { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; object-fit: contain; }
+    .link { font-family: ui-monospace, monospace; font-size: var(--fs-label); word-break: break-all; }
+    .muted { color: var(--text-3); font-size: var(--fs-label); line-height: var(--lh-label); }
+    @media (max-width: 900px) { .app { grid-template-columns: 1fr; } .rail { display: none; } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  </style>
+</head>
+<body>
+<div class="app">
+<aside class="rail">
+  <div class="logo">
+    <img src="/static/hyllora.svg" alt="" width="22" height="28">
+    <div><div class="logo-name">Hyllora</div><div class="logo-sub">Anonymiserare · testfas</div></div>
+  </div>
+  <nav class="rail-nav" aria-labelledby="navLabel">
+    <div class="rail-label" id="navLabel">Anonymiseraren</div>
+    <a href="/" aria-current="page"><svg class="i" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2l6 2.5v4c0 3.6-2.5 6.3-6 7.5-3.5-1.2-6-3.9-6-7.5v-4z"/><circle cx="9" cy="7" r="1.6"/><path d="M9 8.6v3.4M7.3 10l-1.3 2.2M10.7 10l1.3 2.2"/></svg>Översikt</a>
+  </nav>
+  <div class="rail-foot">
+    <div class="local"><span class="status-dot ok small" aria-hidden="true"></span>Bara den här datorn</div>
+  </div>
+</aside>
+
+<div class="content">
+<main>
+  <header class="page-head">
+    <div>
+      <h1>Anonymiserare</h1>
+    </div>
+    <div class="page-actions">
+      <select id="src" aria-label="Källa"></select>
+    </div>
+  </header>
+
+  <div class="page-body">
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-top"><span class="muted">Strömmen</span><span class="status-dot" id="kEndDot"></span></div><div class="kpi-value" id="kEnd">–</div></div>
+      <div class="kpi"><div class="kpi-top"><span class="muted">Personer i bildrutan</span></div><div class="kpi-value" id="kPeople">–</div></div>
+      <div class="kpi"><div class="kpi-top"><span class="muted">Kroppsvektor</span></div><div class="kpi-value" id="kLook">–</div></div>
+      <div class="kpi"><div class="kpi-top"><span class="muted">Bilder av personer ut</span><span class="status-dot ok"></span></div><div class="kpi-value">0</div></div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head"><h2 class="eyebrow">Anonymisera en video</h2></div>
+      <div class="runrow">
+        <label>Ladda upp video <input type="file" id="upFile" accept="video/*,.mov,.mp4,.m4v,.avi,.mkv"></label>
+        <button type="button" class="secondary" id="upBtn" disabled>Ladda upp</button>
+      </div>
+      <div class="bar" id="upBar" hidden><div id="upFill"></div></div>
+      <div class="runrow">
+        <label>Video <select id="runSrc"></select></label>
+        <label>Bildrutor <select id="runStride"><option value="1">Alla</option><option value="3" selected>Var tredje</option></select></label>
+        <label class="check"><input type="checkbox" id="runLook" checked> Kroppsvektor</label>
+        <label class="check"><input type="checkbox" id="runObjects" checked> Leta efter <span id="runObjectsNames">korgar</span></label>
+        <button type="button" id="runBtn">Anonymisera</button>
+        <button type="button" class="secondary" id="stopBtn" hidden>Stoppa</button>
+      </div>
+      <div class="bar" id="bar" hidden><div id="barFill"></div></div>
+      <p class="muted" id="runNote"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2 class="eyebrow">Live-kameror</h2></div>
+      <div class="runrow">
+        <label>Namn <input id="liveName" value="kam1" maxlength="40"></label>
+        <label>Kamera <select id="liveSrc"><option value="">Egen adress …</option></select></label>
+        <label id="liveUrlBox">Adress <input id="liveUrl" placeholder="rtsp://användare:lösen@10.0.0.5/stream" autocomplete="off" spellcheck="false" size="34"></label>
+        <label class="check"><input type="checkbox" id="liveLook" checked> Kroppsvektor</label>
+        <button type="button" id="liveBtn">Starta</button>
+      </div>
+      <p class="muted" id="liveNote"></p>
+      <div class="live-list" id="liveList"></div>
+      <p class="muted">Länken till de anonymiserade live-videorna: <span class="link" id="liveLink">–</span><br>
+        Ut på internet med en tunnel till port <span id="livePort">8431</span>, till exempel <code>cloudflared tunnel --url http://127.0.0.1:8431</code>, och lägg till <code>/v/&lt;nyckeln&gt;/</code> från länken. Bara streckgubbarna nås där.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2 class="eyebrow">Leta efter</h2></div>
+      <div class="things">
+        <div>
+          <div class="runrow">
+            <label>Namn <input id="thingName" value="Kundkorg" maxlength="40"></label>
+            <label>Bild <input type="file" id="thingFile" accept="image/jpeg,image/png"></label>
+            <button type="button" id="thingSave" disabled>Spara</button>
+          </div>
+          <canvas id="thingCanvas" width="640" height="360" hidden></canvas>
+          <p class="muted" id="thingNote"></p>
+        </div>
+        <div class="thing-list" id="thingList"></div>
+      </div>
+    </section>
+
+
+    <section class="panel">
+      <div class="scrub">
+        <button type="button" id="play">Spela</button>
+        <button type="button" class="secondary compact" id="rate">1×</button>
+        <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Tid">
+        <span class="time" id="time">0,0 s</span>
+      </div>
+      <div class="pair">
+        <figure>
+          <figcaption>In</figcaption>
+          <video id="video" muted playsinline preload="auto"></video>
+        </figure>
+        <figure>
+          <figcaption>Ut</figcaption>
+          <canvas id="canvas"></canvas>
+        </figure>
+      </div>
+    </section>
+
+  </div>
+</main>
+</div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const EDGES = [[5,7],[7,9],[6,8],[8,10],[5,6],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16],[0,1],[0,2],[1,3],[2,4]];
+const COLORS = ["#2F6BFF", "#F76707", "#12A150", "#A61E4D", "#7048E8", "#0B7285", "#E67700"];
+const KP = 0.5;
+const video = $("#video"), canvas = $("#canvas"), ctx = canvas.getContext("2d");
+const bg = new Image();
+let list = [], cur = null, frames = [], times = [], lastI = null, rate = 1, objNames = [];
+// "980ccd45_ble.s3" -> "ble": the upload's id and the stride left out, as the Analys view names videos
+const label = (n) => n.replace(/^[0-9a-z]{8}_/, "").replace(/\.s\d+$/, "");
+const fmt = (x, d = 1) => x.toLocaleString("sv-SE", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+async function init() {
+  list = await (await fetch("/api/outputs")).json();
+  const srcs = await (await fetch("/api/sources")).json();
+  $("#runSrc").innerHTML = srcs.map((s) => `<option value="${s.file}">${s.name}</option>`).join("");
+  $("#src").innerHTML = list.length ? list.map((s, i) => `<option value="${i}">${label(s.name)}</option>`).join("")
+    : `<option>Inga anonymiserade källor</option>`;
+  $("#src").onchange = () => load(list[+$("#src").value]);
+  if (list.length) load(list[Math.min(+$("#src").value || 0, list.length - 1)]);
+}
+
+async function load(s) {
+  cur = s; lastI = null;
+  video.removeAttribute("src");
+  if (s.original) video.src = s.original;
+  bg.src = `/api/outputs/${encodeURIComponent(s.name)}/background.jpg?${Date.now()}`;
+  const lines = (await (await fetch(`/api/outputs/${encodeURIComponent(s.name)}/skeleton.jsonl`)).text()).trim().split("\n");
+  const head = JSON.parse(lines[0]);
+  objNames = head.objects || [];
+  frames = []; times = [];
+  for (const l of lines.slice(1)) {
+    const r = JSON.parse(l);
+    if (r.end) continue;
+    frames.push(r); times.push(r.t);
+  }
+  canvas.width = head.size[0]; canvas.height = head.size[1];
+  $("#kEnd").textContent = s.ended ? "Hel" : "Avbruten";
+  $("#kEndDot").className = "status-dot " + (s.ended ? "ok" : "error");
+  $("#kLook").textContent = s.look ? "På" : "Av";
+}
+
+function at(t) {
+  let lo = 0, hi = times.length - 1;
+  if (hi < 0) return null;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (times[m] <= t) lo = m; else hi = m - 1; }
+  return frames[lo];
+}
+
+function lastObjects(t) {
+  let i = times.length ? times.findIndex((x) => x > t) : -1;
+  i = i < 0 ? times.length - 1 : i - 1;
+  for (; i >= 0 && times[i] > t - 1.5; i--) if (frames[i].o) return frames[i].o;
+  return null;
+}
+
+function draw() {
+  requestAnimationFrame(draw);
+  if (!cur) return;
+  const t = video.currentTime || 0;
+  $("#time").textContent = fmt(t) + " s";
+  if (video.duration) $("#seek").value = 1000 * t / video.duration;
+  if (bg.complete && bg.naturalWidth) ctx.drawImage(bg, 0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "rgba(20,20,20,.45)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const f = at(t);
+  if (!f) return;
+  const s = canvas.width / 1280;
+  ctx.font = `600 ${Math.round(22 * s)}px 'Google Sans', Arial, sans-serif`;
+  f.p.forEach((p, row) => {
+    const col = COLORS[p[5] % COLORS.length], k = (i) => [p[6 + 3 * i], p[7 + 3 * i], p[8 + 3 * i]];
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    ctx.lineWidth = 1.5 * s; ctx.setLineDash([6 * s, 5 * s]); ctx.strokeRect(p[0], p[1], p[2] - p[0], p[3] - p[1]); ctx.setLineDash([]);
+    ctx.lineWidth = 4 * s; ctx.lineCap = "round";
+    for (const [a, b] of EDGES) {
+      const A = k(a), B = k(b);
+      if (A[2] < KP || B[2] < KP) continue;
+      ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+    }
+    for (let i = 0; i < 17; i++) { const K = k(i); if (K[2] < KP) continue; ctx.beginPath(); ctx.arc(K[0], K[1], 4.5 * s, 0, 7); ctx.fill(); }
+    const tag = "spår " + p[5] + (f.l && f.l[row] !== undefined ? "  ·  vektor" : "");
+    ctx.fillText(tag, p[0] + 4 * s, p[1] - 8 * s);
+  });
+  // the things looked for: the latest look at or before this frame (once a second)
+  const o = lastObjects(t);
+  ctx.lineWidth = 3 * s; ctx.strokeStyle = ctx.fillStyle = "#FFD43B";
+  for (const b of o || []) {
+    ctx.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    ctx.fillText(`${objNames[b[5]] || "sak"} ${fmt(b[4], 2)}`, b[0] + 4 * s, b[3] + 24 * s);
+  }
+  if (f.i !== lastI) {
+    lastI = f.i;
+    $("#kPeople").textContent = f.p.length;
+  }
+}
+
+$("#play").onclick = () => { video.paused ? video.play() : video.pause(); };
+video.onplay = () => ($("#play").textContent = "Paus");
+video.onpause = () => ($("#play").textContent = "Spela");
+$("#seek").oninput = (e) => { if (video.duration) video.currentTime = video.duration * e.target.value / 1000; };
+$("#rate").onclick = () => { rate = rate === 1 ? 0.25 : rate === 0.25 ? 0.5 : 1; video.playbackRate = rate; $("#rate").textContent = fmt(rate, rate === 1 ? 0 : 2).replace(/,?0+$/, "") + "×"; };
+$("#runBtn").onclick = async () => {
+  const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source: $("#runSrc").value, stride: +$("#runStride").value, look: $("#runLook").checked,
+                           objects: $("#runObjects").checked }) });
+  if (!r.ok) { $("#runNote").textContent = (await r.json()).detail; return; }
+  poll();
+};
+$("#stopBtn").onclick = () => fetch("/api/stop", { method: "POST" });
+// a video uploaded here (on a computer with only the anonymizer there is no analysis app to upload it in)
+$("#upFile").onchange = () => { $("#upBtn").disabled = !$("#upFile").files.length; };
+$("#upBtn").onclick = () => {
+  const file = $("#upFile").files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  const x = new XMLHttpRequest();  // fetch has no upload progress, and a store's video is large
+  $("#upBtn").disabled = true; $("#upBar").hidden = false; $("#upFill").style.width = "0";
+  x.upload.onprogress = (e) => {
+    if (e.lengthComputable) { $("#upFill").style.width = (100 * e.loaded / e.total) + "%"; $("#runNote").textContent = `Laddar upp ${file.name}: ${Math.round(100 * e.loaded / e.total)} %`; }
+  };
+  x.onloadend = async () => {
+    $("#upBar").hidden = true; $("#upBtn").disabled = false;
+    let j = {};
+    try { j = JSON.parse(x.responseText); } catch {}
+    if (x.status !== 200) { $("#runNote").textContent = j.detail || "Uppladdningen misslyckades"; return; }
+    $("#upFile").value = ""; $("#upBtn").disabled = true;
+    await init();
+    $("#runSrc").value = j.file;
+    $("#runNote").textContent = `${j.name} uppladdad. Välj Anonymisera.`;
+  };
+  x.open("POST", "/api/sources");
+  x.send(fd);
+};
+let wasRunning = false;
+async function poll() {
+  const j = await (await fetch("/api/job")).json();
+  $("#runBtn").hidden = j.running; $("#stopBtn").hidden = !j.running; $("#bar").hidden = !j.running;
+  $("#barFill").style.width = (100 * j.progress) + "%";
+  const sent = j.info?.sent ? ` · skickad till analysen: ${j.info.sent.error ? j.info.sent.error : j.info.sent.done ? "hela" : "inte klar"}` : "";
+  if (j.running) $("#runNote").textContent = `${label(j.source)}: ${Math.round(100 * j.progress)} %${j.sends ? " · skickas till analysen medan den görs" : ""}`;
+  else if (j.error) $("#runNote").textContent = j.error;
+  else if (j.info) $("#runNote").textContent = `Klar: ${label(j.source)}${sent}`;
+  if (wasRunning && !j.running) { await init(); const i = list.findIndex((s) => s.name === j.out); if (i >= 0) { $("#src").value = i; load(list[i]); } }
+  wasRunning = j.running;
+  if (j.running) setTimeout(poll, 1000);
+}
+// the things to look for: a photo, a box dragged round the thing, saved under a name
+const tc = $("#thingCanvas"), tx = tc.getContext("2d");
+let photo = null, photoData = null, box = null, drag = null;
+function drawPhoto() {
+  if (!photo) return;
+  tx.drawImage(photo, 0, 0, tc.width, tc.height);
+  if (box) { tx.strokeStyle = "#FFD43B"; tx.lineWidth = Math.max(2, tc.width / 300); tx.strokeRect(box[0], box[1], box[2] - box[0], box[3] - box[1]); }
+}
+$("#thingFile").onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    photoData = r.result;
+    photo = new Image();
+    photo.onload = () => { tc.width = photo.naturalWidth; tc.height = photo.naturalHeight; box = null; tc.hidden = false; drawPhoto();
+      $("#thingNote").textContent = "Dra en ruta runt den."; $("#thingSave").disabled = true; };
+    photo.src = photoData;
+  };
+  r.readAsDataURL(f);
+};
+const at2 = (e) => { const b = tc.getBoundingClientRect(); return [(e.clientX - b.left) * tc.width / b.width, (e.clientY - b.top) * tc.height / b.height]; };
+tc.onpointerdown = (e) => { if (!photo) return; drag = at2(e); tc.setPointerCapture(e.pointerId); };
+tc.onpointermove = (e) => { if (!drag) return; const p = at2(e);
+  box = [Math.min(drag[0], p[0]), Math.min(drag[1], p[1]), Math.max(drag[0], p[0]), Math.max(drag[1], p[1])]; drawPhoto(); };
+tc.onpointerup = () => { drag = null; $("#thingSave").disabled = !(box && box[2] - box[0] > 8 && box[3] - box[1] > 8);
+  if (!$("#thingSave").disabled) $("#thingNote").textContent = "Spara, eller dra en ny ruta."; };
+$("#thingSave").onclick = async () => {
+  const r = await fetch("/api/objects", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: $("#thingName").value, image: photoData, box: box.map(Math.round) }) });
+  if (!r.ok) { $("#thingNote").textContent = (await r.json()).detail; return; }
+  photo = null; box = null; tc.hidden = true; $("#thingFile").value = ""; $("#thingSave").disabled = true;
+  $("#thingNote").textContent = "Sparad.";
+  things();
+};
+async function things() {
+  const objs = await (await fetch("/api/objects")).json();
+  $("#runObjectsNames").textContent = objs.length ? objs.map((o) => o.name.toLowerCase()).join(", ") : "(inget uppladdat)";
+  $("#runObjects").disabled = !objs.length;
+  $("#thingList").innerHTML = objs.length ? objs.map((o) => `<div class="thing"><b>${o.name.replace(/</g, "&lt;")}</b>
+    <span class="muted"> · ${o.refs.length} ${o.refs.length === 1 ? "bild" : "bilder"}</span>
+    <div class="refs">${o.refs.map((r) => `<div class="ref"><canvas data-img="${r.image}" data-box="${r.box.join(",")}" width="72" height="72"></canvas>
+      <button type="button" class="secondary" data-del="${o.id}/${r.image}" aria-label="Ta bort bilden">×</button></div>`).join("")}</div></div>`).join("")
+    : `<p class="muted">Inget uppladdat än.</p>`;
+  // each photo shown as the part inside its box
+  for (const c of $("#thingList").querySelectorAll("canvas[data-img]")) {
+    const im = new Image(), [x0, y0, x1, y1] = c.dataset.box.split(",").map(Number);
+    im.onload = () => { const k = Math.min(72 / (x1 - x0), 72 / (y1 - y0)), w = (x1 - x0) * k, h = (y1 - y0) * k;
+      c.getContext("2d").drawImage(im, x0, y0, x1 - x0, y1 - y0, (72 - w) / 2, (72 - h) / 2, w, h); };
+    im.src = `/api/objects/photo/${encodeURIComponent(c.dataset.img)}`;
+  }
+}
+$("#thingList").onclick = async (e) => {
+  const d = e.target.closest("[data-del]")?.dataset.del;
+  if (!d) return;
+  await fetch(`/api/objects/${d.split("/").map(encodeURIComponent).join("/")}`, { method: "DELETE" });
+  things();
+};
+// live cameras: a camera's address, or an uploaded video played as one (a test camera, anonymizer/testcam.py)
+async function liveInit() {
+  const srcs = await (await fetch("/api/sources")).json();
+  $("#liveSrc").innerHTML = `<option value="">Egen adress …</option>` +
+    srcs.map((s) => `<option value="test:${s.file}">Testkamera: ${s.name}</option>`).join("");
+  $("#liveSrc").onchange = () => { $("#liveUrlBox").hidden = !!$("#liveSrc").value; };
+  try { const l = await (await fetch("/api/link")).json(); $("#liveLink").textContent = l.local; $("#livePort").textContent = l.port; } catch {}
+  livePoll();
+}
+$("#liveBtn").onclick = async () => {
+  const r = await fetch("/api/live", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: $("#liveName").value, url: $("#liveSrc").value || $("#liveUrl").value, look: $("#liveLook").checked }) });
+  $("#liveNote").textContent = r.ok ? "" : (await r.json()).detail;
+  livePoll();
+};
+$("#liveList").onclick = (e) => {
+  const n = e.target.closest("[data-stop]")?.dataset.stop;
+  if (n) fetch(`/api/live/${encodeURIComponent(n)}/stop`, { method: "POST" }).then(livePoll);
+};
+let liveShown = "";
+async function livePoll() {
+  clearTimeout(livePoll.t);
+  const jobs = await (await fetch("/api/live")).json();
+  const key = jobs.map((j) => j.name + j.running).join();
+  if (key !== liveShown) {  // rebuilt only when a camera starts or stops: a new <img> restarts its picture
+    liveShown = key;
+    $("#liveList").innerHTML = jobs.map((j) => `<div class="live-cam"><div class="head"><b>${j.name.replace(/</g, "&lt;")}</b>
+      <span class="muted" data-st="${j.name}"></span>${j.running ? `<button type="button" class="secondary compact" data-stop="${j.name}">Stoppa</button>` : ""}</div>
+      ${j.running ? `<img src="/api/live/${encodeURIComponent(j.name)}/view.mjpg?${Date.now()}" alt="">` : ""}</div>`).join("");
+  }
+  for (const j of jobs) {
+    const el = $(`[data-st="${CSS.escape(j.name)}"]`);
+    if (el) el.textContent = j.running ? `bildruta ${j.frame} · ${Math.round(j.elapsed_s)} s` : j.error || `Klar: ${j.info?.analysed ?? 0} bildrutor, glapp ${j.info?.gaps?.length ?? 0}`;
+  }
+  // the picture appears once the stream has its first lines: retry an image that had nothing to show yet
+  for (const img of $("#liveList").querySelectorAll("img")) if (img.complete && !img.naturalWidth) img.src = img.src.replace(/\?\d+$/, "?" + Date.now());
+  livePoll.t = setTimeout(livePoll, 2000);
+}
+init();
+things();
+poll();
+draw();
+liveInit();
+</script>
+</body>
+</html>

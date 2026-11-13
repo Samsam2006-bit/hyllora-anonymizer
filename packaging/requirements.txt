@@ -1,0 +1,10 @@
+# What the installed anonymizer runs on (packaging/windows/build.ps1), pinned to what it is tested with in the repo.
+# torch and torchvision come first, from PyTorch's CUDA index (build.ps1), or Ultralytics pulls the CPU build.
+ultralytics==8.4.161
+supervision==0.30.5
+timm==1.0.30
+lap==0.5.13
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32
+pyyaml
