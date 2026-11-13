@@ -49,6 +49,24 @@ def stage(out: Path) -> None:
     print(f"{out}: {len(files())} filer i app/, {len(MODELS)} modeller")
 
 
+def _progress():
+    """A line that shows the MB so far (and of how many), rewritten at most twice a second."""
+    import time
+
+    last = [0.0]
+
+    def show(blocks: int, size: int, total: int) -> None:
+        now = time.monotonic()
+        if now - last[0] < 0.5 and blocks * size < total:
+            return
+        last[0] = now
+        done = min(blocks * size, total) if total > 0 else blocks * size
+        of = f" av {total / 1e6:.0f} MB ({100 * done / total:.0f} %)" if total > 0 else " MB"
+        print(f"\r  {done / 1e6:.0f}{of}   ", end="", flush=True)
+
+    return show
+
+
 def fetch_models(models: Path) -> None:
     """MODELS in `models`, each with the published checksum (also packaging/testrepo/get_models.py)."""
     try:  # HTTPS checked by the operating system: Python's own check fails on a fresh Windows (requirements.txt)
@@ -69,7 +87,8 @@ def fetch_models(models: Path) -> None:
             shutil.copyfile(src, part)
         else:
             print(f"Hämtar {name} …")
-            urllib.request.urlretrieve(url, part)
+            urllib.request.urlretrieve(url, part, _progress())
+            print()
         if sha256(part) != want:
             part.unlink()
             sys.exit(f"{name}: fel kontrollsumma")
