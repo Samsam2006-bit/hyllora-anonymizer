@@ -8,3 +8,6 @@ fastapi==0.141.1
 uvicorn[standard]==0.53.0
 python-multipart==0.0.32
 pyyaml
+# HTTPS checked by the operating system, as the browser does: Python's own check fails on a fresh Windows, where
+# the root certificate is fetched only when first needed (CERTIFICATE_VERIFY_FAILED, 2026-11-13), or behind an antivirus
+truststore==0.10.4

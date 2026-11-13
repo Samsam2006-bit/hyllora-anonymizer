@@ -51,6 +51,12 @@ def stage(out: Path) -> None:
 
 def fetch_models(models: Path) -> None:
     """MODELS in `models`, each with the published checksum (also packaging/testrepo/get_models.py)."""
+    try:  # HTTPS checked by the operating system: Python's own check fails on a fresh Windows (requirements.txt)
+        import truststore
+
+        truststore.inject_into_ssl()
+    except ImportError:
+        pass
     models.mkdir(parents=True, exist_ok=True)
     for name in MODELS:
         want, url = WEIGHTS[name]

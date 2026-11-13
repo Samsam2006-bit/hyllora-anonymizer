@@ -10,3 +10,10 @@ it imports and the build and install scripts, all in the installation as source)
 Affero General Public License version 3 (anonymizer/LICENSE), as Ultralytics' YOLO that it runs on (REVIEW_BACKLOG
 LIC1). It comes with ABSOLUTELY NO WARRANTY.
 """
+
+try:  # HTTPS (sending to the analysis) checked by the operating system, as the browser does (packaging/requirements.txt)
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
