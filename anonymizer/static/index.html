@@ -213,8 +213,8 @@ function draw() {
   const t = video.currentTime || 0;
   $("#time").textContent = fmt(t) + " s";
   if (video.duration) $("#seek").value = 1000 * t / video.duration;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);  // the empty store as it is, not darkened
   if (bg.complete && bg.naturalWidth) ctx.drawImage(bg, 0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "rgba(20,20,20,.45)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
   const f = at(t);
   if (!f) return;
   const s = canvas.width / 1280;

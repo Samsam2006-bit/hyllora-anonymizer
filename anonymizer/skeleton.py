@@ -11,7 +11,7 @@
                        a photo of were looked for (objects.py; the header's "objects" names the classes, null: never)
                      last, {"end": true, "frames", "analysed", "wall_s", "background": {...}, "stage_ms": {stage: mean ms per analysed frame}} once the whole video is through. Without it the stream stopped short.
     background.jpg   the store with no one in it (background.py), for calibration and for drawing the people over
-    skeleton.v2.mp4  made from the two above when first asked for (video): the stick figures on the empty store, the
+    skeleton.v3.mp4  made from the two above when first asked for (video): the stick figures on the empty store, the
                      anonymized camera's video for the Analys view after a run, smoothed and at twice the stream's rate
 
 The analysis reads it with `read` and never needs anything else from the anonymizer. Only what the analysis uses
@@ -36,8 +36,10 @@ FILE = "skeleton.jsonl"
 BACKGROUND = "background.jpg"
 N_KP = 17
 ROW = 6 + 3 * N_KP  # x0 y0 x1 y1 conf tid + (x y c) per keypoint
-VIDEO = "skeleton.v2.mp4"  # v2 (2026-11-03): smoothed, twice the rate; an older skeleton.mp4 is not read
-# draw() as the anonymizer's own page draws a frame (static/index.html): the empty store darkened, per track a colour,
+VIDEO = "skeleton.v3.mp4"  # v3 (2026-11-13): the store not darkened; v2 (2026-11-03): smoothed, twice the rate.
+# An older file is not read, so each is made again once
+# draw() as the anonymizer's own page draws a frame (static/index.html): the empty store as it is (not darkened,
+# Sameh 2026-11-13: "det ska vara samma"), per track a colour,
 # a dashed box, the limbs and face (COCO keypoints) and a dot per keypoint from SHOW_C
 EDGES = ((5, 7), (7, 9), (6, 8), (8, 10), (5, 6), (5, 11), (6, 12), (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
          (0, 1), (0, 2), (1, 3), (2, 4))
@@ -279,7 +281,7 @@ def check_line(line: bytes, first: bool) -> dict:
 def draw(img: np.ndarray, rows) -> np.ndarray:
     """One frame's people on the empty store, as the anonymizer's page shows them: all an anonymized camera has to
     show. Made from the stream's numbers only, so nothing of anyone's picture is in it."""
-    out = cv2.addWeighted(img, 0.55, np.full_like(img, 20), 0.45, 0)
+    out = img.copy()
     k = out.shape[1] / 1280
     for r in np.asarray(rows, np.float64).reshape(-1, ROW):
         c = COLORS[int(r[5]) % len(COLORS)]
