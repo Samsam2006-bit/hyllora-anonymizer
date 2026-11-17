@@ -10,7 +10,10 @@ streams in data/skeletons, which the analysis reads as cameras `skeletons/<name>
 """
 
 import base64
+import collections
+import contextlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -24,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import objects, paths, skeleton, view
+from . import hubstatus, objects, paths, skeleton, view
 
 ROOT = paths.ROOT
 DATA = paths.DATA
@@ -38,7 +41,14 @@ BRAND_FILES = {"tokens.css", "style.css", "hyllora.svg"}
 VIDEO = (".mov", ".mp4", ".m4v", ".avi", ".mkv")
 LOCAL = {"127.0.0.1", "::1", "localhost", "testclient"}
 
-app = FastAPI(title="Hyllora anonymiserare", docs_url=None, redoc_url=None, openapi_url=None)
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    if not HUB.is_alive():  # the box's status to the hub (hubstatus.py): sends only once the page has its address
+        HUB.start()
+    yield
+
+
+app = FastAPI(title="Hyllora anonymiserare", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
 
 
 @app.middleware("http")
@@ -310,26 +320,36 @@ class LiveJob:
     def __init__(self, name: str, url: str):
         self.name, self.url, self.out = name, url, f"{name}.live"
         self.running, self.error, self.info, self.proc = True, None, None, None
-        self.started = time.monotonic()
+        self.started, self.started_wall = time.monotonic(), time.time()
+        self._seen = (0, time.monotonic())  # (frame, when it was first that): how long it has stood still
+        self.phase = "Startar"  # the process' latest line on stdout (main.say): what it is doing now
+        self.log: collections.deque[str] = collections.deque(maxlen=LOG_LINES)  # its last lines, both outputs
 
     def frame(self) -> int:
-        """The camera's frame number in the stream's last line (the stream is the only thing the process writes)."""
+        """The camera's frame number in the stream's last line (the stream is the only thing the process writes).
+        0 while the file is still the one a camera of the same name left before this one started."""
         p = SKELETONS / self.out / skeleton.FILE
         try:
+            if float(skeleton.header(p.parent).get("t0") or 0) < self.started_wall - 2:
+                return 0
             with open(p, "rb") as f:
                 f.seek(max(0, p.stat().st_size - 65536))
                 for line in reversed(f.read().splitlines()):
                     m = re.match(rb'\{"i":(\d+)', line)
                     if m:
                         return int(m.group(1))
-        except OSError:
+        except (OSError, ValueError):
             pass
         return 0
 
     def status(self) -> dict:
+        f, now = self.frame(), time.monotonic()
+        if f != self._seen[0]:
+            self._seen = (f, now)
         return {"name": self.name, "out": self.out, "source": skeleton.redact(self.url), "running": self.running,
-                "error": self.error, "info": self.info, "frame": self.frame(),
-                "elapsed_s": round(time.monotonic() - self.started, 1)}
+                "error": self.error, "info": self.info, "frame": f, "phase": self.phase,
+                "still_s": round(now - self._seen[1], 1) if f else None,
+                "log": list(self.log), "elapsed_s": round(now - self.started, 1)}
 
     def stop(self) -> None:
         # a camera stopped is a whole stream: background and end line. Said on its stdin, not with a signal: a
@@ -342,6 +362,7 @@ class LiveJob:
                 pass
 
 
+LOG_LINES = 30
 LIVE: dict[str, LiveJob] = {}
 LIVE_LOCK = threading.Lock()
 
@@ -357,30 +378,48 @@ class LiveIn(BaseModel):
     objects: bool = False
 
 
+def _read_lines(job: LiveJob, stream, keep: list, is_out: bool) -> None:
+    """A camera process' output line by line as it comes: the page sees what it is doing while it runs, not only
+    after it ended (2026-11-13: "bildruta 0" at the store said nothing of why). Every line is redacted: OpenCV and
+    FFmpeg may name the URL, never its login."""
+    for raw in stream:
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if is_out and line.startswith("{"):
+            keep.append(line)
+            continue
+        clean = skeleton.redact(line)[:300]
+        job.log.append(clean)
+        if is_out and not line.startswith(" "):  # "  bildruta n" is progress, the frame is shown anyway
+            job.phase = clean
+        elif not is_out:
+            keep.append(clean)
+
+
 def _run_live(job: LiveJob, look: bool, things: bool):
     import subprocess
 
     try:
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}  # Windows' own code page otherwise
         proc = subprocess.Popen(live_cmd(SKELETONS / job.out, look, things), cwd=ROOT, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                errors="replace", env=env)
         proc.stdin.write(job.url + "\n")  # stdin stays open: "stop" ends the camera, and so does this process ending
         proc.stdin.flush()
         job.proc = proc
-        got = {}
-        readers = [threading.Thread(target=lambda k, s: got.__setitem__(k, s.read()), args=(k, s), daemon=True)
-                   for k, s in (("out", proc.stdout), ("err", proc.stderr))]
+        out, err = [], []
+        readers = [threading.Thread(target=_read_lines, args=(job, s, keep, is_out), daemon=True)
+                   for s, keep, is_out in ((proc.stdout, out, True), (proc.stderr, err, False))]
         for t in readers:
             t.start()
         proc.wait()
         for t in readers:
             t.join()
-        out, err = got.get("out", ""), got.get("err", "")
-        lines = [ln for ln in out.splitlines() if ln.startswith("{")]
-        if job.proc.returncode == 0 and lines:
-            job.info = json.loads(lines[-1])
+        if job.proc.returncode == 0 and out:
+            job.info = json.loads(out[-1])
         else:
-            last = [ln for ln in err.splitlines() if ln.strip()][-1:] or [f"avslutades med {job.proc.returncode}"]
-            job.error = skeleton.redact(last[0])[:300]  # OpenCV and FFmpeg may name the URL: never its login
+            job.error = (err[-1:] or [f"avslutades med {job.proc.returncode}"])[0]
     except Exception as e:
         job.error = skeleton.redact(f"{type(e).__name__}: {e}")
     finally:
@@ -428,6 +467,36 @@ def live_view(name: str):
         raise HTTPException(404)
     return StreamingResponse(view.mjpeg(folder, width=view.LOCAL_WIDTH, quality=view.LOCAL_QUALITY), media_type=f"multipart/x-mixed-replace; boundary={view.BOUNDARY}",
                              headers={"Cache-Control": "no-store"})
+
+
+# ---------- the box's status to the Hyllora hub (hubstatus.py, 2026-11-17): technical status only, never the footage
+HUB = hubstatus.Reporter(lambda: [j.status() for j in list(LIVE.values())])
+
+
+class HubIn(BaseModel):
+    url: str
+    key: str = ""
+
+
+@app.get("/api/hub")
+def hub_get():
+    """The hub's address and how the latest status went, never the key."""
+    cfg = hubstatus.settings()
+    return {"url": cfg["url"], "key_set": bool(cfg["key"]), "last": HUB.last, "every_s": HUB.every_s}
+
+
+@app.put("/api/hub")
+def hub_put(body: HubIn):
+    """Empty address: no status is sent. An empty key keeps the one saved."""
+    url = body.url.strip().rstrip("/")
+    if url and not url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        raise HTTPException(400, "Portalens adress ska börja med https:// (status skickas aldrig okrypterat över nätet)")
+    key = body.key.strip() or hubstatus.settings()["key"]
+    if url and not key.startswith("hb_"):
+        raise HTTPException(400, "Nyckeln från portalen börjar med hb_")
+    hubstatus.save(url, key if url else "")
+    HUB.send_once()  # now, so the page says at once whether the address and key work
+    return hub_get()
 
 
 @app.get("/api/link")

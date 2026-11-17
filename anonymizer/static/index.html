@@ -40,6 +40,8 @@
     .probe .advice { font-weight: 600; margin: var(--s-2) 0 0; }
     .live-cam { background: var(--bg-surface); border: var(--border-w) solid var(--border-card); }
     .live-cam .head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); padding: 10px 12px; font-size: var(--fs-note); }
+    .live-cam details { padding: 0 12px 10px; font-size: var(--fs-note); }
+    .live-cam pre { margin: 6px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
     .live-cam img { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; object-fit: contain; }
     .link { font-family: ui-monospace, monospace; font-size: var(--fs-label); word-break: break-all; }
     .muted { color: var(--text-3); font-size: var(--fs-label); line-height: var(--lh-label); }
@@ -123,6 +125,15 @@
       <div class="live-list" id="liveList"></div>
       <p class="muted">Länken till de anonymiserade live-videorna: <span class="link" id="liveLink">–</span><br>
         Ut på internet med en tunnel till port <span id="livePort">8431</span>, till exempel <code>cloudflared tunnel --url http://127.0.0.1:8431</code>, och lägg till <code>/v/&lt;nyckeln&gt;/</code> från länken. Bara streckgubbarna nås där.</p>
+      <details class="probe" id="hubBox">
+        <summary>Hyllora-portalen: <span id="hubState">–</span></summary>
+        <p class="muted">Lådan skickar kamerornas status till portalen var 15:e sekund, så att Hyllora ser vad som händer här: steg, fel och logg. Ingen bild, inga personer och inga antal lämnar datorn, och adresser skickas utan inloggning och sökväg.</p>
+        <div class="runrow">
+          <label>Portalens adress <input id="hubUrl" placeholder="https://portal.hyllora.com" autocomplete="off" spellcheck="false" size="28"></label>
+          <label>Lådans nyckel <input id="hubKey" type="password" autocomplete="new-password" placeholder="hb_…" size="16"></label>
+          <button type="button" id="hubBtn">Spara</button>
+        </div>
+      </details>
     </section>
 
     <section class="panel">
@@ -371,6 +382,27 @@ $("#thingList").onclick = async (e) => {
   things();
 };
 // live cameras: a camera's address, or an uploaded video played as one (a test camera, anonymizer/testcam.py)
+// the box's status to the Hyllora hub (hubstatus.py): only whether it goes, the key is never shown again
+function hubShow(h) {
+  $("#hubUrl").value = h.url || "";
+  $("#hubKey").placeholder = h.key_set ? "sparad (skriv en ny för att byta)" : "hb_…";
+  const at = h.last?.at ? new Date(h.last.at * 1000).toLocaleTimeString("sv-SE") : "";
+  $("#hubState").textContent = !h.url ? "skickar inget" : h.last?.ok ? `skickar, senast ${at}` : h.last?.error ? `fel ${at}: ${h.last.error}` : "väntar på första sändningen";
+}
+async function hubInit() {
+  clearTimeout(hubInit.t);
+  try { hubShow(await (await fetch("/api/hub")).json()); } catch { /* the page still works */ }
+  hubInit.t = setTimeout(hubInit, 15000);
+}
+$("#hubBtn").onclick = async () => {
+  const r = await fetch("/api/hub", { method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: $("#hubUrl").value, key: $("#hubKey").value }) });
+  const j = await r.json();
+  if (!r.ok) { $("#hubState").textContent = j.detail || "kunde inte spara"; return; }
+  $("#hubKey").value = "";
+  hubShow(j);
+};
+
 async function liveInit() {
   const srcs = await (await fetch("/api/sources")).json();
   $("#liveSrc").innerHTML = `<option value="">Egen adress …</option>` +
@@ -390,6 +422,8 @@ $("#liveList").onclick = (e) => {
   if (n) fetch(`/api/live/${encodeURIComponent(n)}/stop`, { method: "POST" }).then(livePoll);
 };
 let liveShown = "";
+const liveSeen = new Map();  // camera -> { frame, since }: when its frame number last moved
+const STILL_S = 10;
 async function livePoll() {
   clearTimeout(livePoll.t);
   const jobs = await (await fetch("/api/live")).json();
@@ -398,11 +432,27 @@ async function livePoll() {
     liveShown = key;
     $("#liveList").innerHTML = jobs.map((j) => `<div class="live-cam"><div class="head"><b>${j.name.replace(/</g, "&lt;")}</b>
       <span class="muted" data-st="${j.name}"></span>${j.running ? `<button type="button" class="secondary compact" data-stop="${j.name}">Stoppa</button>` : ""}</div>
-      ${j.running ? `<img src="/api/live/${encodeURIComponent(j.name)}/view.mjpg?${Date.now()}" alt="">` : ""}</div>`).join("");
+      ${j.running ? `<img data-img="${j.name}" src="/api/live/${encodeURIComponent(j.name)}/view.mjpg?${Date.now()}" alt="">` : ""}
+      <details><summary class="muted">Logg</summary><pre data-log="${j.name}"></pre></details></div>`).join("");
   }
+  const now = Date.now() / 1000;
   for (const j of jobs) {
     const el = $(`[data-st="${CSS.escape(j.name)}"]`);
-    if (el) el.textContent = j.running ? `bildruta ${j.frame} · ${Math.round(j.elapsed_s)} s` : j.error || `Klar: ${j.info?.analysed ?? 0} bildrutor, glapp ${j.info?.gaps?.length ?? 0}`;
+    const seen = liveSeen.get(j.name);
+    let still = 0;
+    if (!seen || seen.frame !== j.frame) {
+      // the frames move again after standing still: the view may have ended meanwhile, so open it again
+      if (seen && seen.frame && now - seen.since >= STILL_S) {
+        const img = $(`[data-img="${CSS.escape(j.name)}"]`);
+        if (img) img.src = img.src.replace(/\?\d+$/, "?" + Date.now());
+      }
+      liveSeen.set(j.name, { frame: j.frame, since: now });
+    } else still = now - seen.since;
+    if (el) el.textContent = j.running
+      ? [j.phase, j.frame ? `bildruta ${j.frame}` : "ingen bildruta än", still >= STILL_S && j.frame ? `står still ${Math.round(still)} s` : "", `${Math.round(j.elapsed_s)} s`].filter(Boolean).join(" · ")
+      : j.error || `Klar: ${j.info?.analysed ?? 0} bildrutor, glapp ${j.info?.gaps?.length ?? 0}`;
+    const log = $(`[data-log="${CSS.escape(j.name)}"]`);
+    if (log) log.textContent = (j.log || []).join("\n") || "Inget utskrivet än.";
   }
   // the picture appears once the stream has its first lines: retry an image that had nothing to show yet
   for (const img of $("#liveList").querySelectorAll("img")) if (img.complete && !img.naturalWidth) img.src = img.src.replace(/\?\d+$/, "?" + Date.now());
@@ -444,6 +494,7 @@ things();
 poll();
 draw();
 liveInit();
+hubInit();
 </script>
 </body>
 </html>

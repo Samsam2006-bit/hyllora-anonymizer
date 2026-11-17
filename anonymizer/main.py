@@ -54,6 +54,9 @@ SAMPLES = 30  # frames spread over the video that the empty store is made from (
 STREAM_RATE_GUESS = 10.0  # = pipeline.config.REALTIME_FPS_GUESS: analysed frames per second assumed from a camera
 RETRY_MAX_S = 30.0  # = pipeline.config.STREAM_RETRY_MAX_S: a dropped camera is tried after 1, 2, 4 … s, never further
 NO_FRAME_S = 5.0  # a camera that sends nothing this long has dropped (as LatestFrame.get's timeout in the analysis)
+OPEN_TIMEOUT_MS = 10_000  # a camera that does not answer is an error after this, not a page that says nothing (OpenCV's
+                          # own default is 30 s, and the store's computer showed "bildruta 0" without a word, 2026-11-13)
+READ_TIMEOUT_MS = 10_000  # a read that hangs gives up after this, so a dropped camera is opened again
 LIVE_EVERY = 10  # a live camera: a sample for the empty store every this many analysed frames, so it is ready in
                  # ~SAMPLES * LIVE_EVERY frames (~12 s at 25/s) and the anonymized view has the store to draw on
 
@@ -187,6 +190,26 @@ class Latest(threading.Thread):
         self.stopped = True
 
 
+def open_camera(url: str):
+    """A camera's URL straight to FFmpeg (OpenCV's other backends write the whole URL, login included, to the log),
+    with a time limit for opening and for each read: without them a camera that does not answer leaves the run
+    waiting without a word."""
+    return cv2.VideoCapture(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
+                                                  cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS])
+
+
+def say(msg: str) -> None:
+    """What the run is doing now, one line on stdout: the page shows a live camera's latest line (server.LiveJob),
+    so a camera that gives nothing can be told from models still loading or a view that does not show."""
+    print(msg, flush=True)
+
+
+def device_name() -> str:
+    if DEVICE == "cuda":
+        return f"grafikkortet {torch.cuda.get_device_name(0)}"
+    return "Apples grafikkort" if DEVICE == "mps" else "processorn (inget grafikkort hittat, långsamt)"
+
+
 class StreamSource:
     """A live camera: (frame number, seconds since the run started, frame), always the newest frame, so a core slower
     than the camera skips frames instead of falling behind. `t0` is the wall clock at t = 0. A camera that drops is
@@ -195,8 +218,7 @@ class StreamSource:
     live = True
 
     def __init__(self, url: str, opener=None, no_frame_s: float = NO_FRAME_S, retry_max_s: float = RETRY_MAX_S):
-        # a URL goes straight to FFmpeg: OpenCV's other backends write the whole URL, login included, to the log (S5)
-        self.opener = opener or (lambda u: cv2.VideoCapture(u, cv2.CAP_FFMPEG))
+        self.opener = opener or open_camera
         self.url, self.name = url, redact(url)
         self.no_frame_s, self.retry_max_s = no_frame_s, retry_max_s
         self.stride, self.total, self.idx = 1, 0, 0
@@ -205,7 +227,8 @@ class StreamSource:
         cap = self.opener(url)
         if not cap.isOpened():
             cap.release()
-            raise ValueError(f"Kan inte öppna kameran {self.name}")
+            raise ValueError(f"Kan inte öppna kameran {self.name} (inget svar på {OPEN_TIMEOUT_MS // 1000} s: fel adress, "
+                             "inloggning, eller så tar kameran inte fler anslutningar; prova Testa kameran)")
         self.src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
         self.rate = min(self.src_fps or STREAM_RATE_GUESS, STREAM_RATE_GUESS)
         self.t0_mono, self.t0 = time.monotonic(), time.time()
@@ -234,6 +257,7 @@ class StreamSource:
                 tries = 0
                 if self.gaps and self.gaps[-1][1] is None:
                     self.gaps[-1][1] = round(at - self.t0_mono, 3)
+                    say(f"Kameran är tillbaka efter {self.gaps[-1][1] - self.gaps[-1][0]:.0f} s")
                 self.idx = n
                 yield n, at - self.t0_mono, frame
                 continue
@@ -241,6 +265,7 @@ class StreamSource:
             if not self.gaps or self.gaps[-1][1] is not None:
                 self.gaps.append([round(time.monotonic() - self.t0_mono, 3), None])
             self.reader.stop()
+            say(f"Ingen bild från kameran, försöker igen om {min(self.retry_max_s, 2 ** tries):.0f} s")
             if self._stop.wait(min(self.retry_max_s, 2 ** tries)):
                 return
             tries += 1
@@ -347,11 +372,16 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
     address on another computer; the stream goes there as it is written (send.Sender, with `send_key` or send.key())."""
     progress = progress or (lambda i, n: print(f"  {i}/{n} bildrutor" if n else f"  bildruta {i}", flush=True))
     send_key = (send_key or sending.key()) if send else None  # no key: stop before the camera is opened
+    if is_stream(src):
+        say(f"Öppnar kameran {redact(src)}")
     source = StreamSource(src) if is_stream(src) else FileSource(src, stride)
     live = getattr(source, "live", False)
     try:
         out.mkdir(parents=True, exist_ok=True)
         every = max(1, source.total // source.stride // samples) if source.total else LIVE_EVERY if live else 50
+        if live:
+            say(f"Kameran svarar ({source.size[0]}×{source.size[1]}, {source.src_fps:.0f} bilder/s). "
+                f"Laddar modellerna på {device_name()}")
         core = Core(source.size, roi, source.rate, out, look, things, every, samples, **({"pose": pose} if pose else {}))
         head = {"source": source.name, "size": list(source.size), "src_fps": source.src_fps, "rate": source.rate,
                 "stride": source.stride, "frames": source.total, **core.header()}
@@ -362,6 +392,8 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
         if sender:
             sender.start()
         t0 = time.monotonic()
+        if live:
+            say(f"Kör på {device_name()}")
         bg = bg_info = None
         try:
             try:
@@ -410,8 +442,21 @@ def _write_background(core, out: Path):
     if bg is not None:
         tmp = out / ("." + skeleton.BACKGROUND)
         cv2.imwrite(str(tmp) + ".jpg", bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        Path(str(tmp) + ".jpg").replace(out / skeleton.BACKGROUND)
+        replace_retrying(Path(str(tmp) + ".jpg"), out / skeleton.BACKGROUND)
     return bg, info
+
+
+def replace_retrying(src: Path, dst: Path, tries: int = 40, wait_s: float = 0.05) -> None:
+    """On Windows a file cannot be replaced while another process has it open (the page reading the empty store to
+    draw on): wait a moment and try again, rather than end the camera over a picture."""
+    for k in range(tries):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if k == tries - 1:
+                raise
+            time.sleep(wait_s)
 
 
 def _stop_on_stdin() -> None:

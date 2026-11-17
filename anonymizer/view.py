@@ -21,19 +21,38 @@ IDLE_END_S = 30.0  # a stream not written to for this long has stopped (the anon
 BOUNDARY = "frame"
 
 
-def _has_end(path: Path) -> bool:
+def _tail(path: Path) -> tuple[bool, float | None]:
+    """(has the end line, t of the last whole frame line or None) from the file's last few kB."""
     with open(path, "rb") as f:
-        f.seek(max(0, path.stat().st_size - 4096))
-        return b'"end":true' in f.read()
+        f.seek(max(0, path.stat().st_size - 16384))
+        tail = f.read()
+    if b'"end":true' in tail:
+        return True, None
+    for line in reversed(tail.splitlines()[1:] if len(tail) == 16384 else tail.splitlines()):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if "t" in rec:
+            return False, float(rec["t"])
+    return False, None
 
 
 def is_live(folder: Path) -> bool:
-    """A live camera's stream being written now: its header says live, it has no end line, and it grew lately."""
+    """A live camera's stream being written now: its header says live, it has no end line, and its last frame is
+    recent by the stream's own clock (t0 + t), not by the file's modified time, which Windows may not move while
+    another process holds the file open and writes it."""
     p = Path(folder) / skeleton.FILE
     try:
-        if time.time() - p.stat().st_mtime > IDLE_END_S or not skeleton.header(folder).get("live"):
+        head = skeleton.header(folder)
+        if not head.get("live"):
             return False
-        return not _has_end(p)
+        ended, t = _tail(p)
+        if ended:
+            return False
+        if head.get("t0") is None:  # an older stream without its clock
+            return time.time() - p.stat().st_mtime <= IDLE_END_S
+        return time.time() - (float(head["t0"]) + (t or 0.0)) <= IDLE_END_S
     except (OSError, ValueError):
         return False
 
@@ -84,7 +103,9 @@ def mjpeg(folder: Path, stop=lambda: False, fps: float = FPS, poll_s: float = 0.
             try:
                 m = (folder / skeleton.BACKGROUND).stat().st_mtime
                 if m != bg_mtime:
-                    bg, bg_mtime = cv2.imread(str(folder / skeleton.BACKGROUND)), m
+                    got = cv2.imread(str(folder / skeleton.BACKGROUND))
+                    if got is not None:  # caught as it was being replaced: try again with the next picture
+                        bg, bg_mtime = got, m
             except OSError:
                 pass
             jpg = picture(latest, size, bg, width, quality)
