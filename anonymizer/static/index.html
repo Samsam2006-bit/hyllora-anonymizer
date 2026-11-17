@@ -108,9 +108,24 @@
         <label>Namn <input id="liveName" value="kam1" maxlength="40"></label>
         <label>Kamera <select id="liveSrc"><option value="">Egen adress …</option></select></label>
         <label id="liveUrlBox">Adress <input id="liveUrl" placeholder="rtsp://användare:lösen@10.0.0.5/stream" autocomplete="off" spellcheck="false" size="34"></label>
-        <label class="check"><input type="checkbox" id="liveLook" checked> Kroppsvektor</label>
+        <label>Läge <select id="livePreset"><option value="full">Full</option><option value="latt">Lätt</option><option value="egen">Egen</option></select></label>
+        <label title="Startar så många kameror på en gång, med namnet följt av 1, 2, 3 … (för att se hur många datorn klarar)">Antal <input id="liveCount" type="number" min="1" max="30" value="1" style="width:4.5em"></label>
         <button type="button" id="liveBtn">Starta</button>
       </div>
+      <details class="probe" id="liveOpts">
+        <summary>Inställningar: <span id="liveOptsSum"></span></summary>
+        <div class="runrow">
+          <label>Modell <select id="liveModel"><option value="yolo26s-pose.pt">s (noggrannare)</option><option value="yolo26n-pose.pt">n (snabbare)</option></select></label>
+          <label>Bildstorlek <select id="liveImgsz"><option value="960">960 px</option><option value="640">640 px</option></select></label>
+          <label>Takt <select id="liveFps"><option value="0">alla bilder</option><option value="10">10 bilder/s</option><option value="5">5 bilder/s</option><option value="3">3 bilder/s</option></select></label>
+          <label class="check"><input type="checkbox" id="liveLook" checked> Kroppsvektor</label>
+          <label class="check" title="Ingen modell på bilder där inget rör sig och ingen fanns sist"><input type="checkbox" id="liveMotion"> Rörelsekontroll</label>
+          <label class="check" title="Modellerna laddas en gång och alla kamerors bilder körs i samma anrop"><input type="checkbox" id="liveFleet"> Alla kameror i en process</label>
+          <label class="check" title="Videon avkodas på grafikkortet där det går (annars på processorn som förut)"><input type="checkbox" id="liveHw"> Avkodning på grafikkortet</label>
+        </div>
+        <p class="muted">Full är analysens eget. Lätt är byggt för många kameror på ett grafikkort: mindre modell, 640 px, 5 bilder/s, ingen kroppsvektor, ingen modell där inget rör sig, och alla kameror i en process. Bilder/s och modellens tid per bild står vid varje kamera, så lägena går att jämföra.</p>
+      </details>
+      <p class="muted" id="fleetNote" hidden></p>
       <p class="muted" id="liveNote"></p>
       <details class="probe" id="probeBox">
         <summary>Testa kameran: vilken adress ger bilden?</summary>
@@ -411,12 +426,50 @@ async function liveInit() {
   try { const l = await (await fetch("/api/link")).json(); $("#liveLink").textContent = l.local; $("#livePort").textContent = l.port; } catch {}
   livePoll();
 }
+// the camera's settings (anonymizer/settings.py PRESETS): a preset fills them, changing one makes it Egen
+const PRESETS = {
+  full: { model: "yolo26s-pose.pt", imgsz: 960, fps: 0, look: true, motion: false, fleet: false, hwdec: false },
+  latt: { model: "yolo26n-pose.pt", imgsz: 640, fps: 5, look: false, motion: true, fleet: true, hwdec: false },
+};
+function liveOpts() {
+  return { model: $("#liveModel").value, imgsz: +$("#liveImgsz").value, fps: +$("#liveFps").value,
+    look: $("#liveLook").checked, motion: $("#liveMotion").checked, fleet: $("#liveFleet").checked, hwdec: $("#liveHw").checked };
+}
+const optsText = (o) => [o.model.includes("26n") ? "n" : "s", `${o.imgsz} px`, o.fps ? `${o.fps}/s` : "alla bilder",
+  o.look ? "kroppsvektor" : "", o.motion ? "rörelsekontroll" : "", o.fleet ? "en process" : "", o.hwdec ? "avkodning på kortet" : ""].filter(Boolean).join(" · ");
+function presetSet(name) {
+  const o = PRESETS[name];
+  if (o) {
+    $("#liveModel").value = o.model; $("#liveImgsz").value = o.imgsz; $("#liveFps").value = o.fps;
+    $("#liveLook").checked = o.look; $("#liveMotion").checked = o.motion; $("#liveFleet").checked = o.fleet; $("#liveHw").checked = o.hwdec;
+  }
+  $("#liveOptsSum").textContent = optsText(liveOpts());
+}
+$("#livePreset").onchange = () => presetSet($("#livePreset").value);
+for (const id of ["#liveModel", "#liveImgsz", "#liveFps", "#liveLook", "#liveMotion", "#liveFleet", "#liveHw"])
+  $(id).onchange = () => { $("#livePreset").value = "egen"; presetSet("egen"); };
+presetSet("full");
 $("#liveBtn").onclick = async () => {
-  const r = await fetch("/api/live", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: $("#liveName").value, url: $("#liveSrc").value || $("#liveUrl").value, look: $("#liveLook").checked }) });
-  $("#liveNote").textContent = r.ok ? "" : (await r.json()).detail;
+  const n = Math.max(1, Math.min(30, +$("#liveCount").value || 1)), base = $("#liveName").value;
+  $("#liveBtn").disabled = true;
+  try {
+    for (let i = 1; i <= n; i++) {
+      const r = await fetch("/api/live", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: n > 1 ? `${base}${i}` : base, url: $("#liveSrc").value || $("#liveUrl").value, ...liveOpts() }) });
+      $("#liveNote").textContent = r.ok ? "" : (await r.json()).detail;
+      if (!r.ok) break;
+    }
+  } finally { $("#liveBtn").disabled = false; }
   livePoll();
 };
+// the one process for many cameras: how hard the model works (fleet.py)
+async function fleetPoll() {
+  try {
+    const f = await (await fetch("/api/fleet")).json(), s = f.stats, el = $("#fleetNote");
+    el.hidden = !f.running;
+    if (f.running) el.textContent = s ? `En process: ${f.cameras.length} kameror · ${fmt(s.frames_per_s, 1)} bilder/s genom modellen · ${fmt(s.batch ?? 0, 1)} bilder per anrop · ${fmt(s.batch_ms ?? 0, 0)} ms per anrop · modellen upptagen ${Math.round((s.busy ?? 0) * 100)} %${s.gpu_mb ? ` · grafikminne ${s.gpu_mb} MB` : ""}` : "En process: startar …";
+  } catch { /* the page still works */ }
+}
 $("#liveList").onclick = (e) => {
   const n = e.target.closest("[data-stop]")?.dataset.stop;
   if (n) fetch(`/api/live/${encodeURIComponent(n)}/stop`, { method: "POST" }).then(livePoll);
@@ -448,14 +501,16 @@ async function livePoll() {
       }
       liveSeen.set(j.name, { frame: j.frame, since: now });
     } else still = now - seen.since;
+    const st = j.stats ? `${fmt(j.stats.fps, 1)} bilder/s${j.stats.model_ms != null ? ` · modell ${fmt(j.stats.model_ms, 0)} ms` : ""}${j.stats.fps && j.stats.model_fps < j.stats.fps ? ` · modellen på ${Math.round(100 * j.stats.model_fps / j.stats.fps)} %` : ""}` : "";
     if (el) el.textContent = j.running
-      ? [j.phase, j.frame ? `bildruta ${j.frame}` : "ingen bildruta än", still >= STILL_S && j.frame ? `står still ${Math.round(still)} s` : "", `${Math.round(j.elapsed_s)} s`].filter(Boolean).join(" · ")
+      ? [j.phase, st, j.frame ? `bildruta ${j.frame}` : "ingen bildruta än", still >= STILL_S && j.frame ? `står still ${Math.round(still)} s` : "", `${Math.round(j.elapsed_s)} s`, j.opts?.model ? optsText({ ...j.opts, fleet: j.fleet }) : ""].filter(Boolean).join(" · ")
       : j.error || `Klar: ${j.info?.analysed ?? 0} bildrutor, glapp ${j.info?.gaps?.length ?? 0}`;
     const log = $(`[data-log="${CSS.escape(j.name)}"]`);
     if (log) log.textContent = (j.log || []).join("\n") || "Inget utskrivet än.";
   }
   // the picture appears once the stream has its first lines: retry an image that had nothing to show yet
   for (const img of $("#liveList").querySelectorAll("img")) if (img.complete && !img.naturalWidth) img.src = img.src.replace(/\?\d+$/, "?" + Date.now());
+  fleetPoll();
   livePoll.t = setTimeout(livePoll, 2000);
 }
 // "Testa kameran" (probe.py): ports, make, the common RTSP addresses and one frame from the one that works

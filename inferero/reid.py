@@ -40,7 +40,9 @@ def _load():
             m = timm.create_model(REID_MODEL, pretrained=True, num_classes=0, img_size=REID_SIZE,
                                   pretrained_cfg_overlay={"file": weights.path(REID_MODEL + ".safetensors")})
             m = m.eval().to(dev)
-            if dev != "cpu":  # 16-bit on the GPU: 8 % faster, the same vectors (cosine 0.9999, 2026-10-02)
+            from . import gpu
+
+            if gpu.half_ok(dev):  # 16-bit on the GPU: 8 % faster, the same vectors (cosine 0.9999, 2026-10-02)
                 m = m.half()
             cfg = timm.data.resolve_data_config({}, model=m)
             _model = (m, dev, np.array(cfg["mean"], np.float32), np.array(cfg["std"], np.float32))

@@ -66,7 +66,19 @@ def payload(cameras: list[dict], started: float) -> dict:
             "cameras": [{"name": c["name"], "running": c["running"], "phase": scrub(c.get("phase")), "frame": c.get("frame"),
                          "still_s": c.get("still_s"), "elapsed_s": c.get("elapsed_s"), "error": scrub(c.get("error")),
                          "gaps": len((c.get("info") or {}).get("gaps") or []),
+                         "fps": (c.get("stats") or {}).get("fps"), "model_ms": (c.get("stats") or {}).get("model_ms"),
+                         "mode": scrub(_mode(c)),
                          "log": [scrub(x) for x in (c.get("log") or [])[-30:]]} for c in cameras]}
+
+
+def _mode(c: dict) -> str | None:
+    """The camera's settings in a few words (settings.PRESETS), for the hub: which mode works on this computer."""
+    o = c.get("opts") or {}
+    if not o.get("model"):
+        return None
+    return " · ".join(x for x in ("n" if "26n" in o["model"] else "s", f"{o.get('imgsz')} px",
+                                  f"{o['fps']:g}/s" if o.get("fps") else "alla bilder", "rörelsekontroll" if o.get("motion") else "",
+                                  "en process" if c.get("fleet") else "") if x)
 
 
 class Reporter(threading.Thread):

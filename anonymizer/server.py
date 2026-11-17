@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import hubstatus, objects, paths, skeleton, view
+from . import hubstatus, objects, paths, settings, skeleton, view
 
 ROOT = paths.ROOT
 DATA = paths.DATA
@@ -306,19 +306,25 @@ def job():
 LIVE_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://")
 
 
-def live_cmd(out: Path, look: bool, things: bool) -> list[str]:
+def live_cmd(out: Path, look: bool, things: bool, opts: dict | None = None) -> list[str]:
     """With HYLLORA_INGEST_URL set (the analysis on another computer), each camera's stream is sent there as it grows
-    (send.py, J3 (c)); the key is the box's (send.key)."""
+    (send.py, J3 (c)); the key is the box's (send.key). `opts`: the model, size, frames a second and motion check."""
     import sys as _sys
 
+    o = opts or {}
     to = _ingest_url()
     return [_sys.executable, "-m", "anonymizer.main", "-", str(out)] + ([] if look else ["--no-look"]) \
-        + ([] if things else ["--no-objects"]) + (["--send", to] if to else [])
+        + ([] if things else ["--no-objects"]) + (["--send", to] if to else []) \
+        + (["--model", o["model"]] if o.get("model") else []) + (["--imgsz", str(o["imgsz"])] if o.get("imgsz") else []) \
+        + (["--fps", str(o["fps"])] if o.get("fps") else []) + (["--motion"] if o.get("motion") else []) \
+        + (["--hwdec"] if o.get("hwdec") else [])
 
 
 class LiveJob:
-    def __init__(self, name: str, url: str):
+    def __init__(self, name: str, url: str, opts: dict | None = None, fleet: bool = False):
         self.name, self.url, self.out = name, url, f"{name}.live"
+        self.opts, self.fleet = opts or {}, fleet
+        self.stats: dict | None = None  # the process' latest "~ {…}" line (main.Stats): frames a second, model time
         self.running, self.error, self.info, self.proc = True, None, None, None
         self.started, self.started_wall = time.monotonic(), time.time()
         self._seen = (0, time.monotonic())  # (frame, when it was first that): how long it has stood still
@@ -348,12 +354,16 @@ class LiveJob:
             self._seen = (f, now)
         return {"name": self.name, "out": self.out, "source": skeleton.redact(self.url), "running": self.running,
                 "error": self.error, "info": self.info, "frame": f, "phase": self.phase,
-                "still_s": round(now - self._seen[1], 1) if f else None,
+                "still_s": round(now - self._seen[1], 1) if f else None, "opts": self.opts, "fleet": self.fleet,
+                "stats": self.stats,
                 "log": list(self.log), "elapsed_s": round(now - self.started, 1)}
 
     def stop(self) -> None:
         # a camera stopped is a whole stream: background and end line. Said on its stdin, not with a signal: a
         # Windows service has no console to send Ctrl-C or Ctrl-Break through (packaging/windows)
+        if self.fleet:
+            FLEET.send({"cmd": "stop", "name": self.name})
+            return
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write("stop\n")
@@ -376,6 +386,12 @@ class LiveIn(BaseModel):
     url: str
     look: bool = True
     objects: bool = False
+    model: str = settings.MODEL
+    imgsz: int = settings.IMGSZ
+    fps: float = 0.0
+    motion: bool = False
+    fleet: bool = False  # in the one process for many cameras (fleet.py)
+    hwdec: bool = False  # the video decoded on the graphics card where FFmpeg can (main.open_camera)
 
 
 def _read_lines(job: LiveJob, stream, keep: list, is_out: bool) -> None:
@@ -389,6 +405,12 @@ def _read_lines(job: LiveJob, stream, keep: list, is_out: bool) -> None:
         if is_out and line.startswith("{"):
             keep.append(line)
             continue
+        if is_out and line.startswith("~ "):  # main.Stats: numbers only, not a step and not the log
+            try:
+                job.stats = json.loads(line[2:])
+            except ValueError:
+                pass
+            continue
         clean = skeleton.redact(line)[:300]
         job.log.append(clean)
         if is_out and not line.startswith(" "):  # "  bildruta n" is progress, the frame is shown anyway
@@ -397,12 +419,12 @@ def _read_lines(job: LiveJob, stream, keep: list, is_out: bool) -> None:
             keep.append(clean)
 
 
-def _run_live(job: LiveJob, look: bool, things: bool):
+def _run_live(job: LiveJob, look: bool, things: bool, opts: dict | None = None):
     import subprocess
 
     try:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}  # Windows' own code page otherwise
-        proc = subprocess.Popen(live_cmd(SKELETONS / job.out, look, things), cwd=ROOT, stdin=subprocess.PIPE,
+        proc = subprocess.Popen(live_cmd(SKELETONS / job.out, look, things, opts), cwd=ROOT, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                                 errors="replace", env=env)
         proc.stdin.write(job.url + "\n")  # stdin stays open: "stop" ends the camera, and so does this process ending
@@ -437,17 +459,132 @@ def live_start(body: LiveIn):
         url = _testcam_url(file)
     if not name or not url.lower().startswith(LIVE_SCHEMES):
         raise HTTPException(400, "Ett namn (bokstäver, siffror, - och _) och en kameraadress (rtsp:// eller http://) behövs")
+    why = settings.check(body.model, body.imgsz, body.fps)
+    if why:
+        raise HTTPException(400, why)
+    opts = {"model": body.model, "imgsz": body.imgsz, "fps": body.fps, "motion": body.motion, "look": body.look,
+            "hwdec": body.hwdec}
     with LIVE_LOCK:
         if name in LIVE and LIVE[name].running:
             raise HTTPException(409, f"{name} körs redan")
-        job = LIVE[name] = LiveJob(name, url)
-    threading.Thread(target=_run_live, args=(job, body.look, body.objects), daemon=True, name=f"live-{name}").start()
+        job = LIVE[name] = LiveJob(name, url, opts, fleet=body.fleet)
+    if body.fleet:
+        FLEET.add(job)
+    else:
+        threading.Thread(target=_run_live, args=(job, body.look, body.objects, opts), daemon=True,
+                         name=f"live-{name}").start()
     return job.status()
 
 
 @app.get("/api/live")
 def live_list():
     return [j.status() for j in LIVE.values()]
+
+
+@app.get("/api/fleet")
+def fleet_status():
+    """The one process for many cameras: whether it runs, its stats (frames a second through the model, frames per
+    call, time per call, the card's memory) and its last lines."""
+    return FLEET.status()
+
+
+# ---------- many cameras in one process (fleet.py, 2026-11-17)
+class FleetProc:
+    """The one fleet process, started with its first camera. Commands go on its stdin as JSON lines (the address with
+    its login never in the process list); its lines come back as "@<name> …" for a camera, else for itself."""
+
+    def __init__(self):
+        self.proc, self.lock = None, threading.Lock()
+        self.stats: dict | None = None
+        self.log: collections.deque[str] = collections.deque(maxlen=LOG_LINES)
+
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def status(self) -> dict:
+        return {"running": self.running(), "stats": self.stats if self.running() else None, "log": list(self.log),
+                "cameras": sorted(j.name for j in LIVE.values() if j.fleet and j.running)}
+
+    def _start(self) -> None:
+        import subprocess
+        import sys as _sys
+
+        to = _ingest_url()
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        self.proc = subprocess.Popen([_sys.executable, "-m", "anonymizer.fleet", str(SKELETONS)] + (["--send", to] if to else []),
+                                     cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, encoding="utf-8", errors="replace", env=env)
+        self.stats = None
+        proc = self.proc
+        threading.Thread(target=self._read, args=(proc, proc.stdout, True), daemon=True, name="fleet-out").start()
+        threading.Thread(target=self._read, args=(proc, proc.stderr, False), daemon=True, name="fleet-err").start()
+        threading.Thread(target=self._watch, args=(proc,), daemon=True, name="fleet-watch").start()
+
+    def send(self, cmd: dict) -> None:
+        with self.lock:
+            if not self.running():
+                return
+            try:
+                self.proc.stdin.write(json.dumps(cmd) + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                pass
+
+    def add(self, job: LiveJob) -> None:
+        with self.lock:
+            if not self.running():
+                self._start()
+        job.proc = self.proc
+        o = {k: job.opts[k] for k in ("model", "imgsz", "fps", "motion", "look", "hwdec")}
+        self.send({"cmd": "add", "name": job.name, "url": job.url, "opts": o})
+
+    def _read(self, proc, stream, is_out: bool) -> None:
+        for raw in stream:
+            line = raw.rstrip()
+            if not line.strip():
+                continue
+            if is_out and line.startswith("@"):
+                name, _, rest = line[1:].partition(" ")
+                job = LIVE.get(name)
+                if job is None or not job.fleet:
+                    continue
+                if rest.startswith("~ "):
+                    try:
+                        job.stats = json.loads(rest[2:])
+                    except ValueError:
+                        pass
+                elif rest.startswith("!end "):
+                    try:
+                        job.info = json.loads(rest[5:])
+                    except ValueError:
+                        job.info = {}
+                    job.running = False
+                elif rest.startswith("!error "):
+                    job.error = skeleton.redact(rest[7:])[:300]
+                    job.log.append(job.error)
+                    job.running = False
+                else:
+                    clean = skeleton.redact(rest)[:300]
+                    job.log.append(clean)
+                    job.phase = clean
+            elif is_out and line.startswith("~ "):
+                try:
+                    self.stats = json.loads(line[2:])
+                except ValueError:
+                    pass
+            else:
+                self.log.append(skeleton.redact(line)[:300])
+
+    def _watch(self, proc) -> None:
+        proc.wait()
+        time.sleep(0.5)  # its last lines first
+        last = self.log[-1] if self.log else f"avslutades med {proc.returncode}"
+        for j in LIVE.values():
+            if j.fleet and j.running and j.proc is proc:
+                j.error, j.running = f"Den samlade processen stannade: {last}", False
+
+
+FLEET = FleetProc()
 
 
 @app.post("/api/live/{name}/stop")

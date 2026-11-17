@@ -15,6 +15,12 @@ $Here = $PSScriptRoot
 $Py = Join-Path $Here ".venv\Scripts\python.exe"
 $Port = 8430
 $Cuda = "cu128"
+# PyTorch's CUDA 12.8 builds run on RTX 20xx and newer only (compute capability 7.5+); a GTX 10xx (Pascal, 6.x) gets
+# "no kernel image is available". CUDA 12.6 still carries Pascal (published up to PyTorch 2.14).
+try {
+  $cap = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
+  if ($cap -and [double]::Parse($cap.Trim(), [Globalization.CultureInfo]::InvariantCulture) -lt 7.5) { $Cuda = "cu126" }
+} catch { }
 Set-Location $Here
 $env:PYTHONUTF8 = "1"   # else Python reads and writes text in the old Windows code page
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
@@ -92,14 +98,15 @@ if ($have -ne $want) {
   } else {
     Write-Host "Paketen har andrats: installerar om dem." -ForegroundColor Cyan
   }
-  Run uv pip install --python $Py torch torchvision --index-url "https://download.pytorch.org/whl/$Cuda"
+  # --reinstall-package: torch already there from another CUDA build would otherwise be kept as it is
+  Run uv pip install --python $Py torch torchvision --index-url "https://download.pytorch.org/whl/$Cuda" --reinstall-package torch --reinstall-package torchvision
   Run uv pip install --python $Py -r "packaging\requirements.txt"
   Set-Content $ready $want
 }
 
 # 3. the models, then the page
 Run $Py get_models.py
-& $Py -c "import torch; print('Grafikkort:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'INGET, kor pa processorn. Uppdatera NVIDIA-drivrutinen.')"
+& $Py packaging\gpucheck.py $Cuda
 $version = if (Test-Path ".version") { (Get-Content ".version" -Raw).Trim().Substring(0, 7) } else { "?" }
 Write-Host ""
 Write-Host "Anonymiseraren kor pa http://127.0.0.1:$Port  (version $version)" -ForegroundColor Green

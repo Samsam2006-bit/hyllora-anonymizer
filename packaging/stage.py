@@ -26,7 +26,7 @@ FILES = ["anonymizer/**/*.py", "anonymizer/static/**/*", "inferero/__init__.py",
          "packaging/*.py", "packaging/requirements.txt", "packaging/windows/*.ps1", "packaging/windows/*.iss",
          "packaging/windows/*.xml"]
 # the person and pose model (main.MODEL), the body vector (reid.REID_MODEL), the search for baskets (objects.MODEL)
-MODELS = ["yolo26s-pose.pt", "vit_pe_core_base_patch16_224.fb.safetensors", "yoloe-26m-seg.pt"]
+MODELS = ["yolo26s-pose.pt", "yolo26n-pose.pt", "vit_pe_core_base_patch16_224.fb.safetensors", "yoloe-26m-seg.pt"]
 
 
 def files() -> list[str]:

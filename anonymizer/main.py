@@ -40,16 +40,16 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
 
-from inferero import reid, weights  # noqa: E402
+from inferero import gpu, reid, weights  # noqa: E402
 
-from . import background, looks, objects, send as sending, skeleton  # noqa: E402
+from . import background, looks, objects, paths, send as sending, settings, skeleton  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BOTSORT = ROOT / "inferero" / "botsort.yaml"
-MODEL, IMGSZ, CONF = "yolo26s-pose.pt", 960, 0.3  # = DEFAULT_SETTINGS
+MODEL, IMGSZ, CONF = settings.MODEL, settings.IMGSZ, 0.3  # = DEFAULT_SETTINGS
 TRACK_BUFFER_S = 1.5  # = pipeline.config.TRACK_BUFFER_S["botsort"]
 DEVICE = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-HALF = DEVICE != "cpu"
+HALF = gpu.half_ok(DEVICE)  # not on a GTX 10xx: its 16-bit floats are many times slower than 32-bit
 SAMPLES = 30  # frames spread over the video that the empty store is made from (background.py)
 STREAM_RATE_GUESS = 10.0  # = pipeline.config.REALTIME_FPS_GUESS: analysed frames per second assumed from a camera
 RETRY_MAX_S = 30.0  # = pipeline.config.STREAM_RETRY_MAX_S: a dropped camera is tried after 1, 2, 4 … s, never further
@@ -57,6 +57,16 @@ NO_FRAME_S = 5.0  # a camera that sends nothing this long has dropped (as Latest
 OPEN_TIMEOUT_MS = 10_000  # a camera that does not answer is an error after this, not a page that says nothing (OpenCV's
                           # own default is 30 s, and the store's computer showed "bildruta 0" without a word, 2026-11-13)
 READ_TIMEOUT_MS = 10_000  # a read that hangs gives up after this, so a dropped camera is opened again
+# Settings a live camera can be started with (the page's Läge, 2026-11-17, Sameh: "gör så man kan toggla så man kan
+# se vilken som funkar bäst"). Full is the analysis' own; Lätt is what 20 cameras on one GTX 1080 may need: the small
+# model at 640 px, 5 frames a second, no body vector, and no model on a camera where nothing moves.
+PRESETS, MODELS_OK, IMGSZ_OK = settings.PRESETS, settings.MODELS_OK, settings.IMGSZ_OK
+CHECK_IMGSZ = 960  # the empty store's check and its samples' masks at full size whatever the camera runs at
+MOTION_W = 160  # the motion check compares frames this wide, blurred
+MOTION_DIFF = 18  # grey levels for a pixel to have changed
+MOTION_SHARE = 0.002  # of the pixels: more changed than this and the camera has motion
+MOTION_EVERY_S = 2.0  # the model still runs this often on a still camera (someone may stand without moving)
+STATS_EVERY_S = 5.0  # a stats line ("~ {...}") this often: the page shows analysed frames a second per camera
 LIVE_EVERY = 10  # a live camera: a sample for the empty store every this many analysed frames, so it is ready in
                  # ~SAMPLES * LIVE_EVERY frames (~12 s at 25/s) and the anonymized view has the store to draw on
 
@@ -68,6 +78,42 @@ def tracker_cfg(out: Path, rate: float) -> str:
     path = out / "tracker.yaml"
     path.write_text(yaml.safe_dump(cfg))
     return str(path)
+
+
+def make_tracker(rate: float):
+    """A camera's own BoT-SORT, as model.track makes it from the same settings (tracker_cfg): for cameras whose
+    frames go through the model together (fleet.py), where one model has no tracker per camera."""
+    from ultralytics.trackers.bot_sort import BOTSORT as BoTSORT
+    from ultralytics.utils import IterableSimpleNamespace
+
+    cfg = yaml.safe_load(BOTSORT.read_text())
+    cfg["track_buffer"] = max(1, round(TRACK_BUFFER_S * rate))
+    cfg["gmc_method"] = "none"
+    return BoTSORT(IterableSimpleNamespace(**cfg))
+
+
+def detect(model, imgs: list, imgsz: int, conf: float):
+    """People and keypoints in several frames in one call (a batch): the results, untracked."""
+    with gpu.GPU_LOCK:
+        return model.predict(imgs, classes=[0], conf=conf, imgsz=imgsz, device=DEVICE, verbose=False,
+                             quantize=16 if HALF else None)
+
+
+def track(tracker, r, offset=(0, 0)):
+    """One camera's detections (a result of detect) through its tracker, as model.track does it
+    (ultralytics.trackers.track.on_predict_postprocess_end): every frame updates the tracker, also one with nobody."""
+    x0, y0 = offset
+    tracks = tracker.update(r.boxes.cpu().numpy(), r.orig_img)
+    if not len(tracks):
+        return np.zeros((0, 4)), np.zeros(0), np.zeros(0, int), np.zeros((0, 17, 2)), np.zeros((0, 17))
+    idx = tracks[:, -1].astype(int)
+    n = len(idx)
+    kxy, kc = np.zeros((n, 17, 2)), np.zeros((n, 17))
+    if r.keypoints is not None and r.keypoints.conf is not None:
+        kxy, kc = r.keypoints.xy.cpu().numpy()[idx] + np.array([x0, y0]), r.keypoints.conf.cpu().numpy()[idx]
+    h, w = r.orig_shape[:2]  # as Results.update does: the tracker's boxes inside the picture
+    xyxy = np.clip(tracks[:, :4], 0, [w, h, w, h])
+    return xyxy + np.array([x0, y0, x0, y0]), tracks[:, 5], tracks[:, 4].astype(int), kxy, kc
 
 
 def infer(model, frame, roi, tracker: str | None, imgsz: int, conf: float):
@@ -190,18 +236,33 @@ class Latest(threading.Thread):
         self.stopped = True
 
 
-def open_camera(url: str):
+def open_camera(url: str, hwdec: bool = False):
     """A camera's URL straight to FFmpeg (OpenCV's other backends write the whole URL, login included, to the log),
     with a time limit for opening and for each read: without them a camera that does not answer leaves the run
-    waiting without a word."""
-    return cv2.VideoCapture(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
-                                                  cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS])
+    waiting without a word. `hwdec`: the video decoded on the graphics card where FFmpeg can (d3d11va on Windows),
+    else on the processor as before; every frame of every camera is decoded, also those the model skips, so twenty
+    cameras' decoding is many cores."""
+    params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS, cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS]
+    if hwdec:
+        params += [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY]
+    return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+
+
+_OUT = threading.Lock()
+
+
+def emit(line: str) -> None:
+    """One whole line on stdout: threads printing at once (fleet.py's cameras) otherwise run their lines together,
+    and the page then reads one camera's step as another's (2026-11-17)."""
+    with _OUT:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
 
 
 def say(msg: str) -> None:
     """What the run is doing now, one line on stdout: the page shows a live camera's latest line (server.LiveJob),
     so a camera that gives nothing can be told from models still loading or a view that does not show."""
-    print(msg, flush=True)
+    emit(msg)
 
 
 def device_name() -> str:
@@ -217,8 +278,13 @@ class StreamSource:
 
     live = True
 
-    def __init__(self, url: str, opener=None, no_frame_s: float = NO_FRAME_S, retry_max_s: float = RETRY_MAX_S):
-        self.opener = opener or open_camera
+    def __init__(self, url: str, opener=None, no_frame_s: float = NO_FRAME_S, retry_max_s: float = RETRY_MAX_S,
+                 max_fps: float = 0.0, hwdec: bool = False, say=None):
+        """`max_fps`: hand out at most this many frames a second (0: as fast as they are taken), the newest each time.
+        `hwdec`: open_camera's."""
+        self.opener = opener or (lambda u: open_camera(u, hwdec))
+        self.say = say or globals()["say"]  # fleet.py: the camera's own lines carry its name
+        self.max_fps, self._next = float(max_fps or 0), 0.0
         self.url, self.name = url, redact(url)
         self.no_frame_s, self.retry_max_s = no_frame_s, retry_max_s
         self.stride, self.total, self.idx = 1, 0, 0
@@ -245,9 +311,15 @@ class StreamSource:
         if self._first is not None:
             frame, self._first = self._first, None
             self.idx = self.reader.n
+            self._next = time.monotonic() + (1.0 / self.max_fps if self.max_fps else 0.0)  # the first one counts too
             yield self.idx, self.reader.at - self.t0_mono, frame
         tries = 0
         while not self._stop.is_set():
+            if self.max_fps:  # wait for the next one due, then take the newest the camera has sent
+                wait = self._next - time.monotonic()
+                if wait > 0 and self._stop.wait(wait):
+                    return
+                self._next = time.monotonic() + 1.0 / self.max_fps
             t0 = time.perf_counter()
             ok, frame, n, at = self.reader.get(self.no_frame_s)
             stages.add("read", time.perf_counter() - t0)  # mostly waiting for the camera's next frame
@@ -257,7 +329,7 @@ class StreamSource:
                 tries = 0
                 if self.gaps and self.gaps[-1][1] is None:
                     self.gaps[-1][1] = round(at - self.t0_mono, 3)
-                    say(f"Kameran är tillbaka efter {self.gaps[-1][1] - self.gaps[-1][0]:.0f} s")
+                    self.say(f"Kameran är tillbaka efter {self.gaps[-1][1] - self.gaps[-1][0]:.0f} s")
                 self.idx = n
                 yield n, at - self.t0_mono, frame
                 continue
@@ -265,7 +337,7 @@ class StreamSource:
             if not self.gaps or self.gaps[-1][1] is not None:
                 self.gaps.append([round(time.monotonic() - self.t0_mono, 3), None])
             self.reader.stop()
-            say(f"Ingen bild från kameran, försöker igen om {min(self.retry_max_s, 2 ** tries):.0f} s")
+            self.say(f"Ingen bild från kameran, försöker igen om {min(self.retry_max_s, 2 ** tries):.0f} s")
             if self._stop.wait(min(self.retry_max_s, 2 ** tries)):
                 return
             tries += 1
@@ -290,15 +362,26 @@ class Core:
     `every`: a sample for the empty store every this many analysed frames, SAMPLES at most."""
 
     def __init__(self, size, roi, rate: float, out: Path, look: bool = True, things: list[dict] | None = None,
-                 every: int = 50, samples: int = SAMPLES, pose: str | None = None):
+                 every: int = 50, samples: int = SAMPLES, pose: str | None = None, still: Path | None = None,
+                 model: str = MODEL, imgsz: int = IMGSZ, motion: bool = False, shared=None):
+        """`still`: a live camera's kept still (background.Still), so its empty store survives someone standing in
+        the way and the camera starting again; None for a file. `model`, `imgsz`, `motion`: PRESETS. `shared`: the
+        models of a process that runs many cameras (fleet.Models); the frames then come with their detections."""
         from ultralytics import YOLO
 
         W, H = size
         self.roi = tuple(int(v) for v in roi) if roi and tuple(roi) != (0, 0, W, H) else None
-        self.model = YOLO(weights.path(MODEL))
-        # its own model for the background: a predict on the tracking model would run through its tracker's callbacks
-        self.check = YOLO(weights.path(MODEL))
-        self.trk = tracker_cfg(out, rate)
+        self.model_name, self.imgsz, self.motion = model, int(imgsz), bool(motion)
+        if shared is not None:
+            self.model, self.check = None, shared.check(model)
+            self.trk, self.tracker = None, make_tracker(rate)
+        else:
+            self.model = YOLO(weights.path(model))
+            # its own model for the background: a predict on the tracking model would run through its tracker's callbacks
+            self.check = YOLO(weights.path(model))
+            self.trk, self.tracker = tracker_cfg(out, rate), None
+        self.prev_small, self.people, self.last_run_t = None, False, -1e9
+        self.ran = self.skipped = 0
         self.pose = pose  # None: the analysis' default (MODEL, BoT-SORT); else a backends.names() entry
         self.backend = None
         if pose:
@@ -308,27 +391,58 @@ class Core:
         self.things = things or None
         self.finder = objects.Finder(things, DEVICE, HALF) if things else None
         self.next_find = -1.0
-        self.plate = background.Plate((W, H), samples)
+        self.plate = background.Plate((W, H), samples, keep=still is not None)
+        self.still = background.Still(still, self.plate.small) if still is not None else None
         self.every, self.samples = max(1, every), samples
         self.analysed = 0
         self.stages = Stages()
 
     def header(self) -> dict:
         """The core's part of the stream's first line."""
-        return {"roi": list(self.roi) if self.roi else None, "model": self.pose or MODEL, "imgsz": IMGSZ, "conf": CONF,
+        return {"roi": list(self.roi) if self.roi else None, "model": self.pose or self.model_name, "imgsz": self.imgsz,
+                "conf": CONF, "motion": self.motion,
                 "tracker": "bytetrack" if self.pose else "botsort", "background": skeleton.BACKGROUND,
                 "look": reid.REID_MODEL if self.describer else None,
                 "objects": [o["name"] for o in self.things] if self.things else None,
                 "objects_model": objects.MODEL if self.things else None, "objects_every_s": objects.EVERY_S}
 
-    def step(self, frame: np.ndarray, t: float) -> tuple:
-        """(xyxy, conf, tid, kxy, kc, looks or None, things found or None) for one frame at time t."""
+    def crop(self, frame: np.ndarray) -> np.ndarray:
+        return frame[self.roi[1]:self.roi[3], self.roi[0]:self.roi[2]] if self.roi else frame
+
+    def gate(self, frame: np.ndarray, t: float) -> bool:
+        """Whether the model runs on this frame. Without `motion`: always. With it: when the picture moved since the
+        last frame, when someone was there last time, or every MOTION_EVERY_S; a camera where nothing happens costs
+        a small diff and no model."""
+        if not self.motion:
+            return True
+        with self.stages("motion"):
+            h, w = frame.shape[:2]
+            g = cv2.cvtColor(cv2.resize(frame, (MOTION_W, max(1, round(h * MOTION_W / w))), interpolation=cv2.INTER_AREA),
+                             cv2.COLOR_BGR2GRAY)
+            g = cv2.GaussianBlur(g, (5, 5), 0).astype(np.int16)
+            moved = self.prev_small is None or float((np.abs(g - self.prev_small) > MOTION_DIFF).mean()) > MOTION_SHARE
+            self.prev_small = g
+        return moved or self.people or t - self.last_run_t >= MOTION_EVERY_S
+
+    def step(self, frame: np.ndarray, t: float, det=None, run: bool | None = None) -> tuple:
+        """(xyxy, conf, tid, kxy, kc, looks or None, things found or None) for one frame at time t. `det`: its
+        detections from a batch (fleet.py), else the core runs its model. `run` False: the gate said no, nobody."""
         s = self.stages
+        if run is None:
+            run = det is not None or self.gate(frame, t)
+        if not run:
+            self.analysed += 1
+            self.skipped += 1
+            return np.zeros((0, 4)), np.zeros(0), np.zeros(0, int), np.zeros((0, 17, 2)), np.zeros((0, 17)), None, None
         with s("model"):
-            if self.backend is None:
-                xyxy, conf, tid, kxy, kc = infer(self.model, frame, self.roi, self.trk, IMGSZ, CONF)
+            if det is not None:
+                xyxy, conf, tid, kxy, kc = track(self.tracker, det, self.roi[:2] if self.roi else (0, 0))
+            elif self.backend is None:
+                xyxy, conf, tid, kxy, kc = infer(self.model, frame, self.roi, self.trk, self.imgsz, CONF)
             else:
                 xyxy, conf, tid, kxy, kc = self._other(frame)
+        self.ran += 1
+        self.people, self.last_run_t = len(xyxy) > 0, t
         found = None
         if self.finder is not None and t >= self.next_find:
             with s("objects"):
@@ -337,10 +451,10 @@ class Core:
         if self.describer is not None:
             with s("look"):
                 described = self.describer.describe(frame, xyxy, conf, tid, t)
-        if self.analysed % self.every == 0 and len(self.plate.frames) < self.samples:
-            with s("background"):
+        if (self.ran - 1) % self.every == 0 and self.plate.wants():
+            with s("background"), gpu.GPU_LOCK:
                 # every person the detector sees, tracked or not yet, is left out of the empty store
-                self.plate.add(frame, infer(self.check, frame, self.roi, None, IMGSZ, 0.15)[0])
+                self.plate.add(frame, infer(self.check, frame, self.roi, None, CHECK_IMGSZ, 0.15)[0])
         self.analysed += 1
         return xyxy, conf, tid, kxy, kc, described, found
 
@@ -353,18 +467,30 @@ class Core:
         return xyxy, conf, tid, kxy, kc
 
     def background_ready(self) -> bool:
-        """All the samples for the empty store are in."""
-        return len(self.plate.frames) >= self.samples
+        """Time to make the empty store: its samples are in (live: and background.REBUILD new ones since)."""
+        return self.plate.due()
+
+    def _check(self, m, img):
+        with gpu.GPU_LOCK:
+            return infer(m, img, None, None, CHECK_IMGSZ, background.CHECK_CONF)[0]
 
     def background(self):
         """The empty store (an image or None) and what it says about itself."""
         with self.stages("background"):
-            return self.plate.build(self.check, lambda m, img: infer(m, img, None, None, IMGSZ, background.CHECK_CONF)[0])
+            return self.plate.build(self.check, self._check, self.still)
+
+    def background_from_still(self):
+        """A live camera's kept still as the empty store before its samples are in, or (None, None)."""
+        if self.still is None:
+            return None, None
+        with self.stages("background"):
+            return self.still.picture(self.plate.size, self.plate.k, self.check, self._check)
 
 
 def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, look: bool = True, progress=None,
         stop=None, things: list[dict] | None = None, pose: str | None = None, seconds: float | None = None,
-        send: str | None = None, send_key: str | None = None) -> dict:
+        send: str | None = None, send_key: str | None = None, model: str = MODEL, imgsz: int = IMGSZ,
+        fps: float = 0.0, motion: bool = False, hwdec: bool = False) -> dict:
     """A video file or a live camera (a URL) through the core into a skeleton file. `progress(frame, total)` now and
     then; `things`: what the store showed a photo of (objects.load), looked for every objects.EVERY_S; None or []:
     nothing. A file: `stop()` true ends it short (no end line: the analysis sees it stopped). A camera has no end of
@@ -374,7 +500,7 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
     send_key = (send_key or sending.key()) if send else None  # no key: stop before the camera is opened
     if is_stream(src):
         say(f"Öppnar kameran {redact(src)}")
-    source = StreamSource(src) if is_stream(src) else FileSource(src, stride)
+    source = StreamSource(src, max_fps=fps, hwdec=hwdec) if is_stream(src) else FileSource(src, stride)
     live = getattr(source, "live", False)
     try:
         out.mkdir(parents=True, exist_ok=True)
@@ -382,11 +508,15 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
         if live:
             say(f"Kameran svarar ({source.size[0]}×{source.size[1]}, {source.src_fps:.0f} bilder/s). "
                 f"Laddar modellerna på {device_name()}")
-        core = Core(source.size, roi, source.rate, out, look, things, every, samples, **({"pose": pose} if pose else {}))
+        extra = {"pose": pose} if pose else {}
+        extra.update(model=model, imgsz=imgsz, motion=motion)
+        if live:  # the camera's still, by the stream's name: the same camera started again finds it (background.Still)
+            extra["still"] = paths.OWN / "backgrounds" / f"{out.name}.png"
+        core = Core(source.size, roi, source.rate, out, look, things, every, samples, **extra)
         head = {"source": source.name, "size": list(source.size), "src_fps": source.src_fps, "rate": source.rate,
                 "stride": source.stride, "frames": source.total, **core.header()}
         if live:  # t is seconds since t0 (the wall clock, unix seconds): a camera has no video time of its own
-            head.update(live=True, t0=round(source.t0, 3))
+            head.update(live=True, t0=round(source.t0, 3), max_fps=fps or None, hwdec=hwdec)
         w = skeleton.Writer(out, head, flush=live or bool(send))
         sender = sending.Sender(out, send, send_key) if send else None
         if sender:
@@ -395,14 +525,19 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
         if live:
             say(f"Kör på {device_name()}")
         bg = bg_info = None
+        if live:
+            bg, bg_info = _write_background(core, out, core.background_from_still())
         try:
             try:
+                stats = Stats(core) if live else None
                 for idx, t, frame in source.frames(core.stages):
                     rows = core.step(frame, t)
+                    if stats:
+                        stats.tick()
                     with core.stages("write"):
                         w.frame(idx, t, *rows)
-                    if live and bg_info is None and core.background_ready():
-                        # the empty store once its samples are in, not at the end: the view draws on it meanwhile
+                    if live and core.background_ready():
+                        # the empty store once its samples are in, and again as they roll: the view draws on it
                         bg, bg_info = _write_background(core, out)
                     if core.analysed % 100 == 0:
                         progress(idx, source.total)
@@ -414,7 +549,7 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
                 if not live:
                     raise
             source.close()  # through (or a camera stopped): let go of it before the empty store is made
-            if bg_info is None:
+            if bg_info is None or not bg_info.get("samples"):  # none yet, or only the still's
                 bg, bg_info = _write_background(core, out)
         except BaseException:
             w.abort()  # no end line, also when the empty store failed: the analysis never takes it for whole
@@ -423,7 +558,8 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
             raise
     finally:
         source.close()
-    info = {"frames": source.idx, "analysed": core.analysed, "wall_s": round(time.monotonic() - t0, 1),
+    info = {"frames": source.idx, "analysed": core.analysed, "model_runs": getattr(core, "ran", core.analysed),
+            "wall_s": round(time.monotonic() - t0, 1),
             "background": bg_info, "stage_ms": core.stages.mean_ms(core.analysed)}
     if live:
         info["gaps"] = source.gaps
@@ -435,10 +571,31 @@ def run(src: str, out: Path, stride: int = 1, roi=None, samples: int = SAMPLES, 
     return info
 
 
-def _write_background(core, out: Path):
-    """The empty store from the core's samples, written next to the stream (via a temporary file: a reader never
-    gets half a picture)."""
-    bg, info = core.background()
+class Stats:
+    """A line "~ {json}" on stdout every STATS_EVERY_S: frames a second through the core, through the model, and the
+    model's time per frame. The page reads it (server.LiveJob.stats); nothing in it is about the picture."""
+
+    def __init__(self, core, prefix: str = ""):
+        self.core, self.prefix = core, prefix
+        self.t0, self.a0, self.r0, self.m0 = time.monotonic(), 0, 0, 0.0
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        if now - self.t0 < STATS_EVERY_S:
+            return
+        c, dt = self.core, now - self.t0
+        model_s = c.stages.total.get("model", 0.0)
+        ran = getattr(c, "ran", c.analysed) - self.r0
+        line = {"fps": round((c.analysed - self.a0) / dt, 1), "model_fps": round(ran / dt, 1),
+                "model_ms": round(1000 * (model_s - self.m0) / ran, 1) if ran else None}
+        emit(f"{self.prefix}~ {json.dumps(line)}")
+        self.t0, self.a0, self.r0, self.m0 = now, c.analysed, getattr(c, "ran", c.analysed), model_s
+
+
+def _write_background(core, out: Path, made=None):
+    """The empty store from the core's samples (or `made`), written next to the stream (via a temporary file: a
+    reader never gets half a picture)."""
+    bg, info = made if made is not None else core.background()
     if bg is not None:
         tmp = out / ("." + skeleton.BACKGROUND)
         cv2.imwrite(str(tmp) + ".jpg", bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -485,13 +642,18 @@ def main():
     ap.add_argument("--pose", help="another person and pose model to compare (backends.names()); default the analysis' own")
     ap.add_argument("--seconds", type=float, help="a live camera: stop after this many seconds (else Ctrl-C)")
     ap.add_argument("--send", help="the analysis' address on another computer (send.py): the stream goes there as it grows")
+    ap.add_argument("--model", default=MODEL, choices=MODELS_OK, help="the person and pose model (PRESETS)")
+    ap.add_argument("--imgsz", type=int, default=IMGSZ, choices=IMGSZ_OK, help="the model's picture size")
+    ap.add_argument("--fps", type=float, default=0.0, help="a live camera: at most this many frames a second (0: all)")
+    ap.add_argument("--motion", action="store_true", help="no model on frames where nothing moved and nobody was there")
+    ap.add_argument("--hwdec", action="store_true", help="a live camera: decode its video on the graphics card where FFmpeg can")
     a = ap.parse_args()
     if a.src == "-":  # the camera's address on stdin: with its login it must not be in the process list (server.py)
         a.src = sys.stdin.readline().strip()
         _stop_on_stdin()
     roi = [int(v) for v in a.roi.split(",")] if a.roi else None
     info = run(a.src, Path(a.out), max(1, a.stride), roi, look=not a.no_look, things=None if a.no_objects else objects.load(), pose=a.pose, seconds=a.seconds,
-               send=a.send)
+               send=a.send, model=a.model, imgsz=a.imgsz, fps=a.fps, motion=a.motion, hwdec=a.hwdec)
     print(json.dumps(info, ensure_ascii=False))
 
 
